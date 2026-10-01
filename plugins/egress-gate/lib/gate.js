@@ -128,7 +128,6 @@ export function createEgressGate({
   resolveTabId = () => ({ tabId: null }),
   log = () => {},
   now = () => Date.now(),
-  watchRedirects: initialWatchRedirects = null,
   stats = {
     allowed: 0,
     refused: 0,
@@ -159,12 +158,6 @@ export function createEgressGate({
    */
   let observe = () => {};
 
-  /**
-   * Redirect detection hook. Set by ./armed.js so that watchRedirects()
-   * is installed at the same lifecycle point as context.route() (session:created,
-   * before the first page exists).
-   */
-  let watchRedirects = typeof initialWatchRedirects === 'function' ? initialWatchRedirects : null;
 
   async function handle({ route, request, userId, sessionKey }) {
     const url = (() => {
@@ -367,11 +360,6 @@ export function createEgressGate({
       routedContexts.delete(context);
       throw err;
     }
-    // Wire redirect detection at the same lifecycle point as context.route(),
-    // before the first page exists.
-    if (typeof watchRedirects === 'function') {
-      watchRedirects(context, { userId });
-    }
     return registered;
   }
 
@@ -542,10 +530,5 @@ export function createEgressGate({
     setObserver(fn) {
       observe = typeof fn === 'function' ? fn : () => {};
     },
-    /** @internal set by ./armed.js or custom watcher */
-    setRedirectWatcher(fn) {
-      watchRedirects = typeof fn === 'function' ? fn : null;
-    },
-    watchRedirects: (ctx, opts) => watchRedirects?.(ctx, opts),
   };
 }
