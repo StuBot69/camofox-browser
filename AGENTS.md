@@ -476,11 +476,12 @@ Plugin sources can be:
 
 ### Default Plugins
 
-Three plugins ship by default:
+Four plugins ship by default:
 
 - **youtube** -- YouTube transcript extraction (enabled by default)
 - **persistence** -- Per-user session state persistence to `~/.camofox/profiles/` (enabled by default)
 - **vnc** -- Interactive browser login via noVNC (disabled by default, requires `ENABLE_VNC=1`)
+- **egress-gate** -- Deterministic egress gate: mutating requests (POST/PUT/PATCH/DELETE and unknown verbs) require a human approval, enforced via `context.route()` at `session:created` (enabled by default; policy in `plugins/egress-gate/lib/`)
 
 The `youtube` plugin ships as a default plugin -- it's listed in `camofox.config.json` and included in the base Docker image with its deps pre-installed. The base image runs `scripts/install-plugin-deps.sh` which reads the config and installs `apt.txt` packages + `post-install.sh` hooks for listed plugins.
 

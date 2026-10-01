@@ -599,6 +599,68 @@ Uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) when available (fast, no browser
 | `GET` | `/sessions/:userId/storage_state` | Export persisted browser storage ([VNC plugin](plugins/vnc/)) |
 | `DELETE` | `/sessions/:userId/storage_state` | Reset the live session and delete its persisted browser storage ([persistence plugin](plugins/persistence/)) |
 
+### Egress gate
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/egress-gate/audit` | Irreversible decisions (method, URL, allow/refuse, reason). Newest first |
+| `GET` | `/egress-gate/stats` | Counters: silent allows, asks, refusals, pending approvals |
+| `GET` | `/egress-gate/approvals/pending` | Requests waiting on a human |
+| `POST` | `/egress-gate/approvals/:id` | Answer one: `{"approved": true, "scope": "once"\|"session"}` |
+| `GET` | `/egress-gate/grants` | Session grants (`?userId=`) |
+| `DELETE` | `/egress-gate/grants` | Forget a session's grants (`?userId=`) |
+
+## Egress gate: mutating requests need a human
+
+The `[egress-gate](plugins/egress-gate/)` plugin (enabled by default) makes a web
+click that commits a change ask a human, the same way a `computer_use` input or
+a payment already does. Without it, `browser_click` has no approval gate at all:
+the only check on a page action is a scheme check, so "Transfer £500" commits
+silently.
+
+The signal is **the request, not the button**. A closed verb list matched
+against button text is closed only against English, and the page author picks
+the wording ("Terminate subscription", "Yes, do it", "Supprimer le compte").
+Worse, a button labelled **"Cancel subscription"** whose `onclick` fires
+`fetch('/charge', {method:'POST'})` has no verb to match: no form to inspect, no
+`href`, and the label says cancel while the effect says charge. Only the request
+tells you. That case is measured, not argued — see the real-engine test in
+`plugins/egress-gate/integration.test.js`.
+
+**The policy.** `GET`/`HEAD`/`OPTIONS` pass silently and are not logged as
+decisions. `POST`/`PUT`/`PATCH`/`DELETE` — and every other verb, because an
+unknown verb is not evidence of safety — never pass silently:
+
+1. If a human already approved this for this session, allow it and record it.
+2. Otherwise raise the approval surface (`GET /egress-gate/approvals/pending`,
+   answer with `POST /egress-gate/approvals/:id`) and wait.
+3. **Fail closed.** If approval is unavailable, unreachable, times out, or
+   errors, the request is refused. There is no path to "allow" except a human
+   saying yes.
+4. Every irreversible decision is recorded — method, URL, allow/refuse, reason.
+
+Grants are exact: a `session` grant matches the same method and URL (no prefix,
+no query drift); a `once` grant additionally matches the body digest, so
+approving one payload is not approving every payload to that endpoint. Bodies are
+never stored — only a length and a truncated SHA-256 — because a POST body is
+routinely a card number or session token and the log is the thing an operator
+reads.
+
+**Coverage limit — this gate protects actions that go through this server.**
+Anything driving Chrome directly (CDP), a real desktop browser, or any process
+that bypasses camofox-browser is not gated by this. WebSocket frames and requests
+made by service workers are outside the routing surface too. This is stated here
+rather than left for someone to assume otherwise.
+
+**Cost.** Measured locally on the real engine: the gate adds roughly 11–65ms
+median to a click (it varies by request type and page). When a mutating request
+must wait for a human, a form submit holds the action budget for the length of
+the wait, so the approval timeout is clamped below `HANDLER_TIMEOUT_MS`. A gate
+nobody tolerates is a gate someone turns off — if the wait is intolerable on your
+pages, the fix is a session grant, not disabling the gate.
+
+Disable with `"egress-gate": { "enabled": false }` in `camofox.config.json`.
+
 ## Search Macros
 
 `@google_search`  |  `@youtube_search`  |  `@amazon_search`  |  `@reddit_search`  |  `@reddit_subreddit`  |  `@wikipedia_search`  |  `@twitter_search`  |  `@yelp_search`  |  `@spotify_search`  |  `@netflix_search`  |  `@linkedin_search`  |  `@instagram_search`  |  `@tiktok_search`  |  `@twitch_search`
