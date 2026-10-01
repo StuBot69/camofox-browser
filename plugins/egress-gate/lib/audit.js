@@ -44,6 +44,11 @@ export function createAuditLog({ capacity = DEFAULT_AUDIT_CAPACITY, now = () => 
       isNavigation: Boolean(entry.isNavigation),
       bodyBytes: entry.fingerprint?.bytes ?? 0,
       bodyDigest: entry.fingerprint?.digest ?? null,
+      // Which transport decided this. A WebSocket handshake and an HTTP POST are
+      // both "a request the gate looked at", and an operator reading a refusal
+      // needs to know which one it was -- otherwise a refused socket looks like
+      // a refused fetch and the audit cannot answer questions about either.
+      transport: entry.transport ?? 'http',
     };
     entries.push(row);
     if (entries.length > capacity) entries.splice(0, entries.length - capacity);
