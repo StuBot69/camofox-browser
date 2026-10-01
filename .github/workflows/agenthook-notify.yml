@@ -1,0 +1,58 @@
+name: Notify agenthook
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: Event category for the receiving agent.
+        required: true
+        type: string
+      results:
+        description: JSON object containing prerequisite job results.
+        required: true
+        type: string
+    secrets:
+      # Optional: when any of the three is missing the notify step exits
+      # without posting, so callers can pass `secrets: inherit` from a fork.
+      AGENTHOOK_URL:
+        required: false
+      AGENTHOOK_TOKEN:
+        required: false
+      AGENTHOOK_TOPIC:
+        required: false
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify agenthook
+        env:
+          AGENTHOOK_URL: ${{ secrets.AGENTHOOK_URL }}
+          AGENTHOOK_TOKEN: ${{ secrets.AGENTHOOK_TOKEN }}
+          AGENTHOOK_TOPIC: ${{ secrets.AGENTHOOK_TOPIC }}
+          EVENT_KIND: ${{ inputs.kind }}
+          RESULTS: ${{ inputs.results }}
+        run: |
+          # Runs without the agenthook secrets (forks, or a pull request from a fork
+          # in the upstream repository) have nothing to notify; skip instead of failing.
+          if [ -z "$AGENTHOOK_URL" ] || [ -z "$AGENTHOOK_TOKEN" ] || [ -z "$AGENTHOOK_TOPIC" ]; then
+            echo "agenthook secrets are unavailable for this run; skipping the notification"
+            exit 0
+          fi
+          status=$(jq -r '[.[] | .result] | if index("failure") then "failure" elif index("cancelled") then "cancelled" else "success" end' <<< "$RESULTS")
+          curl --fail --silent --show-error --retry 3 \
+            --request POST \
+            --header "Authorization: Bearer ${AGENTHOOK_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$(jq -nc \
+              --arg kind "$EVENT_KIND" \
+              --arg status "$status" \
+              --arg repo "$GITHUB_REPOSITORY" \
+              --arg branch "$GITHUB_REF_NAME" \
+              --arg sha "$GITHUB_SHA" \
+              --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              --argjson results "$RESULTS" \
+              '{kind:$kind,status:$status,repository:$repo,branch:$branch,sha:$sha,run_url:$run_url,results:$results}')" \
+            "${AGENTHOOK_URL}/v1/webhooks/${AGENTHOOK_TOPIC}"
