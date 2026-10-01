@@ -3,10 +3,23 @@
   "name": "Camofox Browser",
   "version": "1.6.0",
   "newPageTimeoutMs": 10000,
-  "interactive": { "mode": "off" },
+  "interactive": {
+    "mode": "off"
+  },
   "plugins": {
-    "youtube": { "enabled": true },
-    "persistence": { "enabled": true },
-    "vnc": { "enabled": false, "resolution": "1920x1080" }
+    "youtube": {
+      "enabled": true
+    },
+    "persistence": {
+      "enabled": true
+    },
+    "vnc": {
+      "enabled": false,
+      "resolution": "1920x1080"
+    },
+    "egress-gate": {
+      "enabled": true,
+      "mode": "ask"
+    }
   }
 }
