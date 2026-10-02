@@ -8,7 +8,7 @@
  */
 import { describe, expect, test, jest } from '@jest/globals';
 import { createApprovalSurface, DEFAULT_APPROVAL_TIMEOUT_MS, SCOPES } from './approval.js';
-import { REASONS, fingerprintBody } from './policy.js';
+import { REASONS, fingerprintBody, decide } from './policy.js';
 
 const REQ = {
   method: 'POST',
@@ -199,5 +199,63 @@ describe('session grants', () => {
     expect(outcome.allowed).toBe(false);
     expect(log).toHaveBeenCalled();
     // The decision is the timeout, not the logger's exception.
+  });
+});
+
+/**
+ * 'Approve once' has to mean once.
+ *
+ * Found by running the end-to-end demo: approve an add-to-bag, click it again,
+ * and the second POST reached the server with no second prompt. A 'once' grant is
+ * stored keyed on method+url+body-digest and nothing consumed it, so any repeat
+ * of the same payload matched it. That is not a hypothetical: an agent stuck in
+ * a retry loop produces identical repeats forever, and the human approved one
+ * action.
+ */
+describe('one-time grants are spent, not kept', () => {
+  async function approveOnce(body = REQ.postData) {
+    const surface = createApprovalSurface({ timeoutMs: 5000, randomId: ids() });
+    const req = { ...REQ, postData: body, fingerprint: fingerprintBody(body) };
+    const pending = surface.ask(req);
+    await new Promise((r) => setTimeout(r, 5));
+    surface.settle('approval-1', { approved: true, scope: 'once' });
+    const outcome = await pending;
+    return { surface, grant: outcome.grant };
+  }
+
+  test('consuming a once-grant removes it, so the repeat asks again', async () => {
+    const { surface, grant } = await approveOnce();
+    expect(surface.listGrants(REQ.sessionKey)).toHaveLength(1);
+
+    expect(surface.consume(REQ.sessionKey, grant)).toBe(true);
+    expect(surface.listGrants(REQ.sessionKey)).toHaveLength(0);
+  });
+
+  test('the repeat of an identical payload is no longer covered', async () => {
+    const { surface, grant } = await approveOnce();
+    surface.consume(REQ.sessionKey, grant);
+
+    // Same method, same URL, same body. It matched before.
+    const repeat = { method: REQ.method, url: REQ.url,
+                     fingerprint: fingerprintBody(REQ.postData) };
+    expect(decide(repeat, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('ask');
+  });
+
+  test('a session grant survives being used -- that is what it is for', async () => {
+    const surface = createApprovalSurface({ timeoutMs: 5000, randomId: ids() });
+    const pending = surface.ask(REQ);
+    await new Promise((r) => setTimeout(r, 5));
+    surface.settle('approval-1', { approved: true, scope: 'session' });
+    const { grant } = await pending;
+
+    expect(surface.consume(REQ.sessionKey, grant)).toBe(false);
+    expect(surface.listGrants(REQ.sessionKey)).toHaveLength(1);
+  });
+
+  test('consuming nothing, or twice, is harmless', async () => {
+    const { surface, grant } = await approveOnce();
+    expect(surface.consume(REQ.sessionKey, null)).toBe(false);
+    expect(surface.consume(REQ.sessionKey, grant)).toBe(true);
+    expect(surface.consume(REQ.sessionKey, grant)).toBe(false);
   });
 });

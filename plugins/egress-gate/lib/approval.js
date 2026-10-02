@@ -86,6 +86,34 @@ export function createApprovalSurface({
     return `${normalizeMethod(grant.method)} ${grant.url}`;
   }
 
+  /**
+   * Consume a grant that has just been used.
+   *
+   * 'once' means ONCE. It has to be spent by the request that used it, or the
+   * label is a lie: a stored 'once' grant is keyed on method+url+body-digest,
+   * so an identical repeat -- which is exactly what a retrying agent produces --
+   * matches it and sails through with no second prompt. The human approved one
+   * action and an unbounded number of them happened.
+   *
+   * Only 'once' grants are removed. A 'session' grant was chosen deliberately
+   * to cover this endpoint for the session, so it survives. Returns true if a
+   * grant was actually spent.
+   */
+  function consume(sessionKey, grant) {
+    if (!grant || grant.scope !== 'once') return false;
+    const map = grantsFor(sessionKey);
+    const key = grantKey(grant);
+    if (!map.has(key)) return false;
+    map.delete(key);
+    note('info', 'one-time grant spent', {
+      sessionKey: String(sessionKey ?? ''),
+      method: grant.method,
+      url: grant.url,
+      approvalId: grant.approvalId ?? null,
+    });
+    return true;
+  }
+
   function listGrants(sessionKey) {
     return [...grantsFor(sessionKey).values()];
   }
@@ -230,6 +258,7 @@ export function createApprovalSurface({
   return {
     ask,
     settle,
+    consume,
     available,
     listPending,
     listGrants,
