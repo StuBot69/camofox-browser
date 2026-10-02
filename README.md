@@ -660,6 +660,16 @@ that bypasses camofox-browser is not gated by this. WebSocket frames and request
 made by service workers are outside the routing surface too. This is stated here
 rather than left for someone to assume otherwise.
 
+Most significantly, **the follow-up hop of a 307/308 redirect chain is outside
+the routing surface.** The gate detects it — it is surfaced as an error-level
+`ungated_request` alert with `prevented: false` — but cannot prevent it, because
+the browser issues that hop below `context.route()`. The approval you gave for
+the first request does not carry to the second, and nothing asks. If a claim
+about redirect coverage ever matters to you, read the measurements before
+trusting it: see [`probes/README.md`](probes/README.md) and run
+`probes/measure_redirect_handler.mjs`. Those probes launch a real browser and
+assert against a real server, which is the layer the unit tests cannot reach.
+
 **Cost.** Measured locally on the real engine: the gate adds roughly 11–65ms
 median to a click (it varies by request type and page). When a mutating request
 must wait for a human, a form submit holds the action budget for the length of
