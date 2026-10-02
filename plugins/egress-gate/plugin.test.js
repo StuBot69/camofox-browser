@@ -229,4 +229,21 @@ describe('egress-gate plugin', () => {
     hDel({ query: { userId: 'u1' } }, res);
     expect(res.body.json).toEqual({ ok: true });
   });
+
+  test('GET /egress-gate/armed is 503 with the scope attached when nothing is proven', async () => {
+    // With no sessions at all the gate has proven nothing, so the answer is no
+    // -- fail closed -- and the body still says what "no" covers, because a
+    // bare 503 without a reason is how an assertion gets waved through.
+    const app = fakeApp();
+    const ctx = fakeCtx();
+    await register(app, ctx, {});
+
+    const h = findHandler(app, 'GET /egress-gate/armed');
+    const res = resStub();
+    h({}, res);
+    expect(res.body.status).toBe(503);
+    expect(res.body.json.armed).toBe(false);
+    expect(res.body.json.scope.preventionOfRedirectChains).toBe('unavailable-in-plugin');
+    expect(res.body.json.egress.prevented).toBe(0);
+  });
 });

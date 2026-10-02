@@ -70,12 +70,16 @@ Latest run:
     ws handler invoked             : 1
     server saw /ws                 : 0
 
-`routeWebSocket()` **does** intercept on this engine, so it is wireable. But the
-server never saw `/ws` and the browser state was `timeout` — meaning
-`connectToServer()` does not complete, so there is no pass-through path to approve
-into. That is a **narrower and more awkward** result than "wire it and it works",
-and it is why WebSocket support is documented as not shipped rather than
-half-shipped.
+`routeWebSocket()` **does** intercept on this engine, so refusal works and is
+wired into arming: every handshake goes through the policy and the approval
+queue, and unapproved ones are closed. But the server never saw `/ws` and the
+browser state was `timeout` — meaning `connectToServer()` does not complete, so
+there is no pass-through path to approve into. An approved socket is therefore
+refused too, loudly and with its own reason
+(`egress_gate_websocket_passthrough_unsupported`), because a refused socket is
+diagnosable and a phantom connected one is not. If this probe ever shows the
+server receiving the upgrade, the gate should be changed to allow — that would
+be the engine gaining a capability, not the test going stale.
 
 ### `measure_firefox_gate.mjs` — page.route() on Firefox
 

@@ -236,37 +236,10 @@ export async function register(app, ctx, pluginConfig = {}) {
    * belongs to the whole server, and a policy decision changing a page's status
    * code is not something to do silently.
    *
-   * @openapi
-   * /egress-gate/armed:
-   *   get:
-   *     tags: [System]
-   *     summary: Whether the egress gate is provably armed on every live session
-   *     description: >
-   *       Returns 200 when the gate is proven armed for every live session and
-   *       503 otherwise. The response body is returned in both cases and always
-   *       includes `scope`, which states what the gate does and does not cover
-   *       (307/308 redirect-chain hops are detected, never prevented).
-   *     responses:
-   *       200:
-   *         description: Gate proven armed on every live session.
-   *         content:
-   *           application/json:
-   *             schema:
-   *               type: object
-   *               properties:
-   *                 armed:
-   *                   type: boolean
-   *                 state:
-   *                   type: string
-   *       503:
-   *         description: Gate not armed, or arming could not be proven.
-   *         content:
-   *           application/json:
-   *             schema:
-   *               type: object
-   *               properties:
-   *                 armed:
-   *                   type: boolean
+   * NOTE: plugin routes are not part of openapi.json. The generator only reads
+   * server.js, and every route it knows about is a server.js route -- so there
+   * is deliberately no @openapi block here. Documenting this endpoint in README
+   * instead of pretending the spec covers it.
    */
   app.get('/egress-gate/armed', middleware, (_req, res) => {
     const snap = armed.snapshot();
