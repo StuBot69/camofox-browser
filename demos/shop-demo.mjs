@@ -144,7 +144,15 @@ const audit = createAuditLog({ log: (...a) => console.log('  [GATE]', ...a) });
 // nothing to a human. The real product wires that to the app's event bus. Here
 // it is wired to a dialog injected into the page, so the prompt appears in the
 // window you are watching, in the page you are acting on.
-const approval = createApprovalSurface({ mode: 'ask', timeoutMs: 90000 });
+// Generous on purpose: the lib's default is 20s, and an expiry mid-demo looks
+// identical to a refusal. Long enough that only a real non-answer times out.
+const approval = createApprovalSurface({
+  mode: 'ask',
+  timeoutMs: 240000,
+  // Without this the gate's own "awaiting human approval" line never prints, so
+  // a silent run is indistinguishable from a press that never reached the gate.
+  log: (level, message, fields) => console.log('  [GATE]', message, fields ?? {}),
+});
 
 const gate = createEgressGate({ approval, audit, log: (...a) => console.log('  [GATE]', ...a) });
 
@@ -191,8 +199,16 @@ function startApprovalPrompt(pg, decisions) {
       }
 
       const verb = choice ? 'APPROVED' : 'REFUSED';
-      console.log(`  [YOU] ${verb}`);
-      decisions.push(`${verb} ${JSON.stringify(entry.request ?? {})}`.slice(0, 90));
+      // Log WHAT was decided, not just that something was. The record already
+      // carries method/url and a body digest -- never the body itself.
+      // listPending() maps to entry.record, so the fields are on `entry` itself.
+      // Reading entry.record.method gave undefined and printed '?'.
+      const rec = entry.record ? entry.record : entry;
+      const what = `${rec.method ?? '?'} ${rec.url ?? '?'}`;
+      const digest = rec.fingerprint?.digest ?? null;
+      console.log(`  [YOU] ${verb}  ${what}${digest ? `  (digest ${digest.slice(0,8)})` : ''}`);
+      decisions.push({ verb, method: rec.method ?? null, url: rec.url ?? null,
+                       digest, id: entry.id });
       approval.settle(entry.id, { approved: choice, scope: 'once' });
     }
   }, 250);
@@ -229,10 +245,11 @@ console.log('  in-page log says:', JSON.stringify(await page.locator('#log').inn
 console.log(`  server saw: ${JSON.stringify(seen)}`);
 console.log('  ^ GET /search present means browsing is unblocked. That is the latency case.');
 
-await page.locator('#add').dispatchEvent('click');
-// Stu found this by doing exactly this: approve, then press it again. Repeat it
-// every run so the demo keeps testing the thing it was built to catch.
-console.log('  (pressing Add to bag a SECOND time -- must ask again, not slip through)');
+// dispatchEvent() bypasses the engine's own click dedup, so a real click here
+// would double-fire and make the counts lie. Keep dispatch, but press ONCE per
+// intended action.
+console.log('\n  >>> I press "Add to bag" (1 of 3). A LODESTAR dialog will appear.');
+console.log('  >>> Read it, then Approve or Refuse.');
 await page.locator('#add').dispatchEvent('click');
 // The approval dialog is a fixed overlay, so Playwright's actionability check
 // refuses to click through it. Trigger the action in-page instead, then let the
@@ -243,26 +260,44 @@ console.log('  dialog visible:', await page.locator('text=Irreversible action re
 // Wait for a real answer rather than a fixed sleep: an undecided approval and a
 // refusal look identical from outside.
 const t0 = Date.now();
-while (decisions.length < 1 && Date.now() - t0 < 120000) await pause(500);
+while (decisions.length < 1 && Date.now() - t0 < 260000) await pause(500);
 await pause(1500);
-console.log(`  after the repeat: server saw ${JSON.stringify(seen)}`);
-console.log('  ^ two POST /cart entries is CORRECT now: the second one was asked about.');
-console.log('  in-page log says:', JSON.stringify(await page.locator('#log').innerText()));
+// THE regression test, kept in the demo because a user found it and no test
+// did: press the same button again with an identical body. Before the consume()
+// fix this sailed through with no second prompt.
+console.log('\n  >>> I press "Add to bag" AGAIN (2 of 3), identical body.');
+console.log('  >>> A dialog MUST appear. Before the fix, this one went straight through.');
+await page.locator('#add').dispatchEvent('click');
+await pause(2000);
+console.log('  dialog visible after repeat:', await page.locator('text=Irreversible action requested').count() > 0);
+console.log('  pending approvals right now:', approval.pendingCount());
+
+// WAIT for the answer to THIS press before pressing anything else. Racing ahead
+// is what made the previous runs unreadable: buttons were pressed while the
+// human was still reading the dialog for the previous one.
+await pause(1500);
+const tRepeat = Date.now();
+while (decisions.length < 2 && Date.now() - tRepeat < 260000) await pause(500);
+console.log(`  after the repeat: ${decisions.length} of 2 cart decisions answered`);
 console.log(`  server saw: ${JSON.stringify(seen)}`);
-console.log('  ^ POST /cart arrives ONLY if you approved the dialog.');
+console.log('  ^ 2 entries with 2 approvals is CORRECT: the repeat asked again.');
 
 // --- 2. pay: the one that matters
 step(2, 'PAY - the irreversible one');
-console.log('  A dialog will appear in the browser window. Read it before deciding.');
-console.log('  This one carries a CARD NUMBER. Refusing it is the point.');
+console.log('\n  >>> I press "Pay £49.00" (3 of 3). This one carries a CARD NUMBER.');
+console.log('  >>> REFUSING it is the demo. Approving it proves the decision carries through.');
 await page.locator('#pay').dispatchEvent('click');
 
 // Wait for a real decision, not a fixed sleep. An undecided approval and a
 // refusal look identical from outside, so the run must not end until you answer.
+// Wait for a payment decision specifically, not for a count. Counting was how
+// the last run concluded "you REFUSED" after three approvals.
 const t1 = Date.now();
-while (decisions.length < 3 && Date.now() - t1 < 180000) await pause(500);
-if (decisions.length < 2) {
-  console.log('  !! no answer given within 120s -- this run proves nothing about the gate');
+while (!decisions.some(d => String(d.url ?? '').includes('/pay')) && Date.now() - t1 < 260000) {
+  await pause(500);
+}
+if (!decisions.some(d => String(d.url ?? '').includes('/pay'))) {
+  console.log('  !! the payment dialog was never answered -- this run proves nothing');
 }
 
 console.log('\n===== RESULT ' + '='.repeat(42));
@@ -272,24 +307,68 @@ console.log('');
 // Distinguish "the gate held it" from "the run ended before anyone decided".
 // Only the first is a result. Conflating them is how you get a green that means
 // nothing -- an undecided approval and a refusal look identical from outside.
-const decided = decisions.length;
-const cartPosts = seen.filter(x => x === 'POST /cart').length;
-console.log(`  POST /cart count: ${cartPosts}`);
-if (seen.includes('POST /pay')) {
-  console.log(`VERDICT: the payment LANDED after you ${decisions[decisions.length - 1]}.`);
-  console.log('  The gate asked, a human answered, and the answer was carried out.');
-  console.log('  That is the product: not a refusal, a decision.');
-} else if (decided < 2) {
-  console.log('VERDICT: INCONCLUSIVE. The payment did not land, but nobody decided.');
-  console.log(`  only ${decided} approval(s) answered; the run ended first.`);
-  console.log('  This is NOT evidence the gate held anything. Re-run and answer both');
-  console.log('  dialogs to get a result.');
-} else {
-  console.log(`VERDICT: you REFUSED the payment and the gate held it.`);
-  console.log('  The card number never left the machine. That is the product.');
+// Match decisions to what was ASKED, not to how many were answered. Counting
+// approvals and inferring intent from the count is how "you REFUSED" got
+// printed after three approvals.
+const askedAbout = (frag) => decisions.filter(d => String(d.url ?? '').includes(frag));
+const payDecisions = askedAbout('/pay');
+const cartDecisions = askedAbout('/cart');
+const payLanded = seen.includes('POST /pay');
+const payApproved = payDecisions.some(d => d.verb === 'APPROVED');
+const payRefused  = payDecisions.some(d => d.verb === 'REFUSED');
+
+console.log('\n  --- what was asked, and what you said ---');
+if (!decisions.length) console.log('  (no dialogs were answered)');
+for (const d of decisions) console.log(`  ${d.verb.padEnd(9)} ${d.method ?? '?'} ${d.url ?? '?'}`);
+
+console.log('\n  --- what the server received ---');
+console.log(`  ${JSON.stringify(seen)}`);
+
+// The gate's own account of what it decided, so the verdict is not based only
+// on what the human thinks they clicked.
+console.log('\n===== THE GATE\'S OWN AUDIT ' + '='.repeat(34));
+const rows = audit.list ? audit.list({ limit: 50 }) : [];
+if (!rows.length) console.log('  (audit empty)');
+for (const r of rows) {
+  console.log(`  ${String(r.decision).padEnd(8)} ${r.method ?? '?'} ${r.url ?? '?'}  ${r.reason ?? ''}`
+    + (r.grantedScope ? `  scope=${r.grantedScope}` : ''));
 }
-console.log(`\n  approvals answered: ${decided}`);
-console.log(`  ${decisions.join(', ') || '(none)'}`);
+console.log(`\n  counts: ${JSON.stringify(audit.counts())}`);
+
+console.log('\n===== VERDICT ' + '='.repeat(40));
+if (payLanded && payApproved) {
+  console.log('CORRECT AND DEMONSTRATED. You approved POST /pay and it landed.');
+  console.log('  The gate asked, a human decided, and the decision was carried out.');
+  console.log('  That is the product: not a refusal, a decision.');
+} else if (payLanded && !payApproved) {
+  console.log('*** DEFECT: the payment landed WITHOUT an approval for it ***');
+  console.log('  Decide the rest of this yourself; do not ship this build.');
+} else if (payRefused) {
+  console.log('CORRECT AND DEMONSTRATED. You REFUSED POST /pay and it was held.');
+  console.log('  The card number never left the machine. That is the product.');
+} else if (payDecisions.length === 0) {
+  console.log('INCONCLUSIVE. POST /pay was never put to you.');
+  console.log('  A refusal cannot be inferred from the absence of a dialog. Re-run');
+  console.log('  and answer the payment prompt.');
+} else {
+  console.log('INCONCLUSIVE. The payment did not land and you did not refuse it.');
+  console.log(`  payment decisions: ${JSON.stringify(payDecisions)}`);
+  console.log('  This is neither a pass nor a hold -- something else went wrong.');
+}
+
+// The grant fix, judged on what actually reached the server.
+const cartPosts = seen.filter(x => x === 'POST /cart').length;
+console.log('\n===== ONE-TIME GRANT CHECK ' + '='.repeat(28));
+console.log(`  cart dialogs answered : ${cartDecisions.length}`);
+console.log(`  POST /cart on server  : ${cartPosts}`);
+if (cartDecisions.length === 0) {
+  console.log('  UNTESTED -- no cart dialog was answered this run.');
+} else if (cartPosts > cartDecisions.filter(d => d.verb === 'APPROVED').length) {
+  console.log('  *** DEFECT: more POST /cart landed than were approved ***');
+} else {
+  console.log('  CORRECT. Every POST /cart on the server was approved one-for-one.');
+  console.log('  A repeat asked again instead of matching a spent grant.');
+}
 
 await pause(2000);
 stopPrompt();

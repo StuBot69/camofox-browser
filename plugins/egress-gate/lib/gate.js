@@ -230,9 +230,6 @@ export function createEgressGate({
         grantedScope: decision.grant?.scope ?? null,
       });
       await allow();
-      // Spend a one-time grant AFTER the request is let through, so a handler
-      // that throws does not burn an approval the human never got to use.
-      approval.consume(sessionKey, decision.grant);
       return;
     }
 

@@ -205,57 +205,57 @@ describe('session grants', () => {
 /**
  * 'Approve once' has to mean once.
  *
- * Found by running the end-to-end demo: approve an add-to-bag, click it again,
- * and the second POST reached the server with no second prompt. A 'once' grant is
- * stored keyed on method+url+body-digest and nothing consumed it, so any repeat
- * of the same payload matched it. That is not a hypothetical: an agent stuck in
- * a retry loop produces identical repeats forever, and the human approved one
- * action.
+ * Found by Stu running the end-to-end demo the way a person does: approve the
+ * add-to-bag, press it again. The second POST reached the server with no second
+ * prompt.
+ *
+ * A 'once' grant is keyed on method+url+body-digest. Storing one lets any
+ * identical repeat match it -- and an identical repeat is exactly what a
+ * retrying agent emits, forever. An earlier attempt stored the grant and spent it
+ * AFTER decide() had already returned 'allow'; the repeat still went through,
+ * because by then the decision had been made. A one-time approval is therefore
+ * not stored at all: it allows the request it was given for, and nothing else.
  */
-describe('one-time grants are spent, not kept', () => {
-  async function approveOnce(body = REQ.postData) {
+describe("'once' is one request, not a standing grant", () => {
+  const askAndApprove = async (scope) => {
     const surface = createApprovalSurface({ timeoutMs: 5000, randomId: ids() });
-    const req = { ...REQ, postData: body, fingerprint: fingerprintBody(body) };
-    const pending = surface.ask(req);
+    const pending = surface.ask(REQ);
     await new Promise((r) => setTimeout(r, 5));
-    surface.settle('approval-1', { approved: true, scope: 'once' });
+    surface.settle('approval-1', { approved: true, scope });
     const outcome = await pending;
-    return { surface, grant: outcome.grant };
-  }
+    return { surface, outcome };
+  };
 
-  test('consuming a once-grant removes it, so the repeat asks again', async () => {
-    const { surface, grant } = await approveOnce();
-    expect(surface.listGrants(REQ.sessionKey)).toHaveLength(1);
-
-    expect(surface.consume(REQ.sessionKey, grant)).toBe(true);
+  test("a once-approval allows its own request and is not kept as a grant", async () => {
+    const { surface, outcome } = await askAndApprove('once');
+    expect(outcome.allowed).toBe(true);
+    // The grant is returned so the caller can audit it, but it is NOT stored,
+    // so no later request can match it.
+    expect(outcome.grant).toMatchObject({ scope: 'once' });
     expect(surface.listGrants(REQ.sessionKey)).toHaveLength(0);
   });
 
-  test('the repeat of an identical payload is no longer covered', async () => {
-    const { surface, grant } = await approveOnce();
-    surface.consume(REQ.sessionKey, grant);
-
-    // Same method, same URL, same body. It matched before.
+  test('an identical repeat asks again rather than matching the approval', async () => {
+    const { surface } = await askAndApprove('once');
     const repeat = { method: REQ.method, url: REQ.url,
                      fingerprint: fingerprintBody(REQ.postData) };
     expect(decide(repeat, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('ask');
   });
 
-  test('a session grant survives being used -- that is what it is for', async () => {
-    const surface = createApprovalSurface({ timeoutMs: 5000, randomId: ids() });
-    const pending = surface.ask(REQ);
-    await new Promise((r) => setTimeout(r, 5));
-    surface.settle('approval-1', { approved: true, scope: 'session' });
-    const { grant } = await pending;
-
-    expect(surface.consume(REQ.sessionKey, grant)).toBe(false);
+  test('a session grant IS stored -- that is the scope a human chose on purpose', async () => {
+    const { surface, outcome } = await askAndApprove('session');
+    expect(outcome.grant).toMatchObject({ scope: 'session' });
     expect(surface.listGrants(REQ.sessionKey)).toHaveLength(1);
+
+    const repeat = { method: REQ.method, url: REQ.url,
+                     fingerprint: fingerprintBody('a completely different body') };
+    expect(decide(repeat, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('allow');
   });
 
-  test('consuming nothing, or twice, is harmless', async () => {
-    const { surface, grant } = await approveOnce();
-    expect(surface.consume(REQ.sessionKey, null)).toBe(false);
-    expect(surface.consume(REQ.sessionKey, grant)).toBe(true);
-    expect(surface.consume(REQ.sessionKey, grant)).toBe(false);
+  test('a session grant covers a different body; a once-approval would not have', async () => {
+    const { surface } = await askAndApprove('session');
+    const other = { method: REQ.method, url: REQ.url,
+                    fingerprint: fingerprintBody('card=5555555555554444&cvv=999') };
+    expect(decide(other, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('allow');
   });
 });

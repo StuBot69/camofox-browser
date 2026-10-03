@@ -160,7 +160,7 @@ describe('POST matching an approval is allowed and recorded', () => {
     expect(entry.bodyDigest).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  test('a second identical request is allowed by the grant and still recorded', async () => {
+  test('a second identical request asks again, because once means once', async () => {
     const { approval, gate, audit } = harness({ timeoutMs: 5000 });
     const request = () => fakeRequest({ method: 'POST', url: 'http://x.test/charge', postData: 'amount=500' });
 
@@ -170,14 +170,41 @@ describe('POST matching an approval is allowed and recorded', () => {
     approval.settle(record.id, { approved: true, scope: 'once' });
     expect((await first).resolutions).toEqual(['continue']);
 
-    // Same payload again: the once-grant covers it, and nobody is asked twice.
+    // Same payload again. This test used to assert the opposite -- "the once-grant
+    // covers it, and nobody is asked twice" -- which is exactly the bug Stu found
+    // by pressing the button twice in the end-to-end demo. An identical repeat is
+    // what a retrying agent emits, and one approval was given for one action.
     expect(approval.pendingCount()).toBe(0);
-    const second = await run(gate, request());
-    expect(second.resolutions).toEqual(['continue']);
+    const second = run(gate, request());
+    await new Promise((r) => setTimeout(r, 5));
+    expect(approval.pendingCount()).toBe(1);
+    approval.settle(approval.listPending()[0].id, { approved: true, scope: 'once' });
+    expect((await second).resolutions).toEqual(['continue']);
 
     const entries = audit.list();
     expect(entries).toHaveLength(2);
     expect(entries.every((e) => e.decision === 'allowed')).toBe(true);
+  });
+
+  test('an unanswered repeat is refused rather than silently allowed', async () => {
+    const { approval, gate, audit } = harness({ timeoutMs: 40 });
+    const request = () => fakeRequest({ method: 'POST', url: 'http://x.test/charge', postData: 'amount=500' });
+
+    const first = run(gate, request());
+    await new Promise((r) => setTimeout(r, 5));
+    approval.settle(approval.listPending()[0].id, { approved: true, scope: 'once' });
+    expect((await first).resolutions).toEqual(['continue']);
+
+    // Nobody answers this one. It must be refused -- fail closed -- not allowed
+    // on the strength of the approval given a moment ago.
+    const second = await run(gate, request());
+    expect(second.resolutions).toEqual(['abort']);
+
+    // audit.list() is most-recent-first, so the refusal is entries[0].
+    const entries = audit.list();
+    expect(entries).toHaveLength(2);
+    expect(entries[0].decision).toBe('refused');
+    expect(entries[1].decision).toBe('allowed');
   });
 
   test('a session grant covers a different payload to the same endpoint', async () => {
