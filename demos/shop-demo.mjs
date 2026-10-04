@@ -1,26 +1,34 @@
 // THE DEMO. One real shop, one real checkout, Lodestar in the path.
 //
-// This is not a probe and not a test. It is the end-to-end run: a real browser,
-// a real page, a real irreversible POST, and a gate that decides about it in
-// front of you. Run it headed and watch the window.
-//
 //   export CAMOUFOX_BIN=~/Library/Caches/camoufox/browsers/official/*/Camoufox.app/Contents/MacOS/camoufox
 //   node demos/shop-demo.mjs
 //
-// Three runs, in order, so you see the gate make a decision rather than just
-// block everything:
+// WHY THIS PAGE IS BUILT THE WAY IT IS
 //
-//   1. BROWSE   - loads the shop, searches, opens the product. GETs only.
-//                 Should sail through. This is the case that must NOT be slow
-//                 enough to make someone turn the gate off.
-//   2. ADD TO BAG + CHECKOUT - an actual POST that costs nothing but is still
-//                 mutating. Gate asks.
-//   3. PAY - POST /pay with a card number in the body. Gate asks again.
-//                 Approve it and the payment lands. This is the one that proves
-//                 the gate is a decision point and not a blanket refusal.
+// The previous version pressed the buttons itself and let the human answer
+// whatever dialog appeared. That produced a real failure: the run logged THREE
+// approvals and the human remembered TWO. Three identical-looking dialogs in a
+// row, no step number, no way to tell which one you had just cleared -- so the
+// log and the only other witness disagreed, with no way to settle it.
 //
-// The approval prompt is IN the browser window, not a terminal dialog, so what
-// you see is what an operator would see.
+// An ambiguous witness is worse than no witness. Now:
+//
+//   1. YOU press the buttons. This script never dispatches a click.
+//   2. Every dialog names the step it belongs to, read from the page.
+//   3. One running transcript is rendered ON THE PAGE, and the same entries
+//      print to the terminal. Both of us read the same ordered list, so there
+//      is nothing left to reconcile afterwards.
+//   4. The window never closes itself. You close it, or it holds for HOLD_MS.
+//
+// The three steps, in order:
+//
+//   STEP 1  Add to bag        POST /cart -- mutating, must ask
+//   STEP 2  Add to bag again  POST /cart -- IDENTICAL body. A dialog MUST appear
+//                              again. Before the d6fbe8e fix this sailed through
+//                              silently on a spent grant.
+//   STEP 3  Pay GBP 49.00     POST /pay  -- carries a card number
+//
+// Approving step 3 proves the gate is a DECISION point, not a blanket refusal.
 
 import http from 'node:http';
 import { firefox } from 'playwright-core';
@@ -32,6 +40,9 @@ const HEADED = process.env.HEADED !== '0';
 const BIN = process.env.CAMOUFOX_BIN || process.env.CAMOUFOX_EXECUTABLE;
 if (!BIN) { console.error('set CAMOUFOX_BIN'); process.exit(2); }
 
+// How long to wait for a human at each step before calling the run inconclusive.
+const STEP_TIMEOUT_MS = Number(process.env.STEP_TIMEOUT_MS || 240000);
+
 // ---------------------------------------------------------------- the shop
 
 const CARD = '4242424242424242';
@@ -40,62 +51,111 @@ const seen = [];
 const PAGE = `<!doctype html><meta charset=utf-8>
 <title>Lodestar Demo Shop</title>
 <style>
- body{font:16px/1.5 -apple-system,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#111}
- h1{font-size:24px} button{font:inherit;padding:10px 18px;margin:4px 4px 4px 0;cursor:pointer}
- input{font:inherit;padding:8px;width:260px;margin:8px 0}
- .box{border:1px solid #ddd;border-radius:8px;padding:16px;margin:16px 0;background:#fafafa}
- #log{font:13px ui-monospace,monospace;background:#111;color:#0f0;padding:12px;border-radius:8px;white-space:pre-wrap}
- .warn{color:#b00;font-weight:600}
+ body{font:15px/1.55 -apple-system,sans-serif;max-width:780px;margin:28px auto;padding:0 20px;color:#111}
+ h1{font-size:22px;margin:0 0 2px}
+ .sub{color:#666;font-size:13px;margin-bottom:18px}
+ .bar{background:#111;color:#fff;padding:14px 18px;border-radius:10px;margin:0 0 16px;font-size:14px}
+ .bar b{color:#fbbf24}
+ button{font:inherit;font-weight:600;padding:11px 18px;margin:0 8px 8px 0;cursor:pointer;
+        border-radius:8px;border:1px solid #bbb;background:#fff}
+ button.pay{background:#111;color:#fff;border-color:#111}
+ .row{display:flex;align-items:center;gap:10px;margin:0 0 6px;font-size:13px;color:#555}
+ .row input{font:inherit;padding:7px;width:220px;border:1px solid #ccc;border-radius:6px}
+ pre{background:#0f172a;color:#e2e8f0;padding:16px;border-radius:10px;font:12.5px/1.7 ui-monospace,Menlo,monospace;
+     max-height:44vh;overflow:auto;white-space:pre-wrap}
+ h2{font-size:15px;margin:20px 0 8px}
 </style>
 
-<h1>Lodestar Demo Shop</h1>
-<p>A shop with one product and a checkout that really does take a card.</p>
+<h1>Lodestar demo shop</h1>
+<div class="sub">Press the buttons <b>yourself</b>. The script will not press them for you.</div>
 
-<div class=box>
-  <input id=q placeholder="search: widget">
-  <button onclick="search()">Search</button>
+<div class="bar">
+  <b>YOU drive this test.</b> Press step 1, answer the dialog, then step 2, answer the
+  dialog, then step 3. Every dialog names its step. Nothing closes until you close it.
 </div>
 
-<div class=box>
-  <h2>Widget &mdash; &pound;49.00</h2>
-  <p>In stock. Ships tomorrow.</p>
-  <button id=add onclick="addToBag()">Add to bag</button>
-  <button id=pay onclick="pay()">Pay &pound;49.00</button>
+<div class="row"><input id="q" value="widget"><button id="search">Search (GET &mdash; should never ask)</button></div>
+
+<div style="margin:14px 0">
+  <button id="add">STEP 1 &mdash; Add to bag</button>
+  <button id="add2">STEP 2 &mdash; Add to bag again (identical body)</button>
+  <button id="pay" class="pay">STEP 3 &mdash; Pay &pound;49.00 (carries a card number)</button>
 </div>
 
-<h2>What the server received</h2>
-<div id=log>nothing yet</div>
+<h2>Running transcript &mdash; the same list prints to the terminal</h2>
+<pre id="t">waiting for you to press STEP 1...</pre>
 
 <script>
- let bag = 0; void bag;
+ // One ordered transcript. The terminal prints the same entries, so the human
+ // and the log can never tell different stories about the same run.
+ window.__lodestar = { step: 0, transcript: [] };
+
+ function render() {
+   const el = document.getElementById('t');
+   el.textContent = window.__lodestar.transcript.join('\\n')
+     || 'waiting for you to press STEP 1...';
+   el.scrollTop = el.scrollHeight;
+ }
+ window.__say = function (who, text) {
+   const tag = { you:'[YOU]  ', gate:'[GATE]', srv:'[SRV] ', bad:'[FAIL]' }[who] || '[....]';
+   const line = tag + ' ' + text;
+   window.__lodestar.transcript.push(line);
+   render();
+   return line;
+ };
+
  async function post(path, body) {
    const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'},
                                 body: JSON.stringify(body)});
    return {status: r.status, text: await r.text()};
  }
- async function show(msg) {
-   const el = document.getElementById('log');
-   el.textContent = msg + String.fromCharCode(10) + '---' + String.fromCharCode(10) + el.textContent;
+
+ // STEP 1 and STEP 2 send a byte-identical body on purpose. That is the point:
+ // a one-time approval must not become a standing grant for the same payload.
+ function wireCart(id, n, what) {
+   document.getElementById(id).onclick = async () => {
+     window.__lodestar.step = n;
+     // Publish to the DOM as well. The driver cannot read page globals on this
+     // engine (page.evaluate runs in an isolated world), so a data attribute on
+     // <body> is the only channel that carries this value back to the script.
+     document.body.dataset.step = String(n);
+     window.__say('gate', 'step ' + n + ' (' + what + ') -- you pressed the button.');
+     try {
+       const r = await post('/cart', {sku:'widget-1', qty:1});
+       window.__say('srv', 'server RECEIVED POST /cart -> ' + r.status + ' ' + r.text);
+     } catch (e) {
+       window.__say('bad', 'POST /cart did NOT reach the server: ' + e.message);
+     }
+   };
  }
- async function search() {
+ wireCart('add', 1, 'Add to bag');
+ wireCart('add2', 2, 'Add to bag AGAIN, identical body');
+
+ // CARD is interpolated here because this template literal is rendered into the
+ // BROWSER. A bare CARD is a Node-scope identifier that is undefined there:
+ // pay() threw a ReferenceError, its own try/catch swallowed it into a page
+ // message, and the gate was never asked about /pay at all. The demo then
+ // reported INCONCLUSIVE, which is indistinguishable from a gate correctly
+ // waiting on a human.
+ document.getElementById('pay').onclick = async () => {
+   window.__lodestar.step = 3;
+   document.body.dataset.step = '3';
+   window.__say('gate', 'step 3 (Pay, carries a card number) -- you pressed the button.');
+   try {
+     const r = await post('/pay', {card: '${CARD}', amount: 49, cvc:'123'});
+     window.__say('srv', '*** SERVER RECEIVED POST /pay *** -> ' + r.status + ' ' + r.text);
+   } catch (e) {
+     window.__say('bad', 'POST /pay did NOT reach the server: ' + e.message);
+   }
+ };
+
+ document.getElementById('search').onclick = async () => {
    const q = document.getElementById('q').value;
    const r = await fetch('/search?q=' + encodeURIComponent(q));
-   show('SEARCH ' + q + ' -> ' + r.status);
- }
- async function addToBag() {
-   bag++;
-   const r = await post('/cart', {sku:'widget-1', qty:1});
-   show('ADD TO BAG -> ' + r.status + ' ' + r.text + '  (bag=' + bag + ')');
- }
- async function pay() {
-   show('PAYING... (if the gate asks, approve in the dialog)');
-   try {
-     const r = await post('/pay', {card: CARD, amount: 49, cvc:'123'});
-     show('PAY -> ' + r.status + ' ' + r.text);
-   } catch (e) {
-     show('PAY BLOCKED: ' + e.message);
-   }
- }
+   window.__say('srv', 'server RECEIVED GET /search -> ' + r.status
+     + '   (a GET must never ask -- a dialog here would be a defect)');
+ };
+ render();
 </script>`;
 
 function startServer() {
@@ -148,7 +208,7 @@ const audit = createAuditLog({ log: (...a) => console.log('  [GATE]', ...a) });
 // identical to a refusal. Long enough that only a real non-answer times out.
 const approval = createApprovalSurface({
   mode: 'ask',
-  timeoutMs: 240000,
+  timeoutMs: Number(process.env.APPROVAL_TIMEOUT_MS || 240000),
   // Without this the gate's own "awaiting human approval" line never prints, so
   // a silent run is indistinguishable from a press that never reached the gate.
   log: (level, message, fields) => console.log('  [GATE]', message, fields ?? {}),
@@ -156,64 +216,7 @@ const approval = createApprovalSurface({
 
 const gate = createEgressGate({ approval, audit, log: (...a) => console.log('  [GATE]', ...a) });
 
-// The human side. A poll for pending approvals, rendered as a dialog in the
-// page itself. This is the piece the product does not have yet -- in the real
-// thing this would be a push to the operator's UI. Here it is a real prompt in
-// a real window, which is the part that matters for the demo.
-function startApprovalPrompt(pg, decisions) {
-  let seenIds = new Set();
-  const timer = setInterval(async () => {
-    const pending = approval.listPending();
-    if (!pending.length) return;
-    for (const entry of pending) {
-      if (seenIds.has(entry.id)) continue;
-      seenIds.add(entry.id);
-
-      const detail = entry.request ? JSON.stringify(entry.request) : '';
-      let choice;
-      try {
-        choice = await pg.evaluate((d) => new Promise((res) => {
-        const box = document.createElement('div');
-        box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;'
-          + 'align-items:center;justify-content:center;z-index:2147483647;font:15px -apple-system,sans-serif';
-        box.innerHTML = '<div style="background:#fff;padding:26px 28px;border-radius:12px;'
-          + 'max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,.4)">'
-          + '<div style="font-size:12px;letter-spacing:.09em;color:#b45309;font-weight:700">LODESTAR</div>'
-          + '<h2 style="margin:8px 0 4px;font-size:20px">Irreversible action requested</h2>'
-          + '<pre style="background:#f5f5f5;padding:12px;border-radius:8px;font-size:12px;'
-          + 'white-space:pre-wrap;overflow:auto;max-height:170px">'
-          + d.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</pre>'
-          + '<div style="margin-top:18px;display:flex;gap:10px">'
-          + '<button id="no"  style="flex:1;padding:11px;border-radius:8px;border:1px solid #ccc;'
-          + 'background:#fff;font:inherit;cursor:pointer">Refuse</button>'
-          + '<button id="yes" style="flex:1;padding:11px;border-radius:8px;border:0;'
-          + 'background:#111;color:#fff;font:inherit;cursor:pointer;font-weight:600">Approve once</button>'
-          + '</div></div>';
-        document.body.appendChild(box);
-        box.querySelector('#yes').onclick = () => { box.remove(); res(true); };
-        box.querySelector('#no').onclick  = () => { box.remove(); res(false); };
-        }), detail);
-      } catch {
-        // browser closed underneath us; nothing left to approve
-        return;
-      }
-
-      const verb = choice ? 'APPROVED' : 'REFUSED';
-      // Log WHAT was decided, not just that something was. The record already
-      // carries method/url and a body digest -- never the body itself.
-      // listPending() maps to entry.record, so the fields are on `entry` itself.
-      // Reading entry.record.method gave undefined and printed '?'.
-      const rec = entry.record ? entry.record : entry;
-      const what = `${rec.method ?? '?'} ${rec.url ?? '?'}`;
-      const digest = rec.fingerprint?.digest ?? null;
-      console.log(`  [YOU] ${verb}  ${what}${digest ? `  (digest ${digest.slice(0,8)})` : ''}`);
-      decisions.push({ verb, method: rec.method ?? null, url: rec.url ?? null,
-                       digest, id: entry.id });
-      approval.settle(entry.id, { approved: choice, scope: 'once' });
-    }
-  }, 250);
-  return () => clearInterval(timer);
-}
+// ---------------------------------------------------------------- the run
 
 const browser = await firefox.launch({ headless: !HEADED, executablePath: BIN });
 const context = await browser.newContext();
@@ -224,85 +227,146 @@ if (!registered) {
   console.error('gate FAILED to install -- refusing to run, that is the fail-closed path');
   process.exit(3);
 }
-console.log('gate installed.\n');
+console.log('gate installed.');
 
 const page = await context.newPage();
 await page.goto(url, { waitUntil: 'load' });
-const decisions = [];
-const stopPrompt = startApprovalPrompt(page, decisions);
-console.log('page loaded. window should be open.\n');
+page.on('pageerror', e => {
+  console.log('  [PAGE ERROR]', e.message.split('\n')[0]);
+  mirror('bad', 'the page threw: ' + e.message.split('\n')[0]);
+});
 
 const pause = (ms) => new Promise(r => setTimeout(r, ms));
-const step = (n, t) => console.log(`\n===== ${n}. ${t} ${'='.repeat(Math.max(0, 46 - t.length))}`);
 
-// --- 1. browse: must be uneventful
-step(1, 'BROWSE - GETs only, should sail through');
-page.on('pageerror', e => console.log('  [PAGE ERROR]', e.message.split('\n')[0]));
-await page.fill('#q', 'widget');
-await page.click('button:has-text("Search")');
-await pause(2000);
-console.log('  in-page log says:', JSON.stringify(await page.locator('#log').innerText()));
-console.log(`  server saw: ${JSON.stringify(seen)}`);
-console.log('  ^ GET /search present means browsing is unblocked. That is the latency case.');
-
-// dispatchEvent() bypasses the engine's own click dedup, so a real click here
-// would double-fire and make the counts lie. Keep dispatch, but press ONCE per
-// intended action.
-console.log('\n  >>> I press "Add to bag" (1 of 3). A LODESTAR dialog will appear.');
-console.log('  >>> Read it, then Approve or Refuse.');
-await page.locator('#add').dispatchEvent('click');
-// The approval dialog is a fixed overlay, so Playwright's actionability check
-// refuses to click through it. Trigger the action in-page instead, then let the
-// human answer the dialog that appears.
-console.log('  (a LODESTAR dialog should be covering the page right now)');
-await pause(1000);
-console.log('  dialog visible:', await page.locator('text=Irreversible action requested').count() > 0);
-// Wait for a real answer rather than a fixed sleep: an undecided approval and a
-// refusal look identical from outside.
-const t0 = Date.now();
-while (decisions.length < 1 && Date.now() - t0 < 260000) await pause(500);
-await pause(1500);
-// THE regression test, kept in the demo because a user found it and no test
-// did: press the same button again with an identical body. Before the consume()
-// fix this sailed through with no second prompt.
-console.log('\n  >>> I press "Add to bag" AGAIN (2 of 3), identical body.');
-console.log('  >>> A dialog MUST appear. Before the fix, this one went straight through.');
-await page.locator('#add').dispatchEvent('click');
-await pause(2000);
-console.log('  dialog visible after repeat:', await page.locator('text=Irreversible action requested').count() > 0);
-console.log('  pending approvals right now:', approval.pendingCount());
-
-// WAIT for the answer to THIS press before pressing anything else. Racing ahead
-// is what made the previous runs unreadable: buttons were pressed while the
-// human was still reading the dialog for the previous one.
-await pause(1500);
-const tRepeat = Date.now();
-while (decisions.length < 2 && Date.now() - tRepeat < 260000) await pause(500);
-console.log(`  after the repeat: ${decisions.length} of 2 cart decisions answered`);
-console.log(`  server saw: ${JSON.stringify(seen)}`);
-console.log('  ^ 2 entries with 2 approvals is CORRECT: the repeat asked again.');
-
-// --- 2. pay: the one that matters
-step(2, 'PAY - the irreversible one');
-console.log('\n  >>> I press "Pay £49.00" (3 of 3). This one carries a CARD NUMBER.');
-console.log('  >>> REFUSING it is the demo. Approving it proves the decision carries through.');
-await page.locator('#pay').dispatchEvent('click');
-
-// Wait for a real decision, not a fixed sleep. An undecided approval and a
-// refusal look identical from outside, so the run must not end until you answer.
-// Wait for a payment decision specifically, not for a count. Counting was how
-// the last run concluded "you REFUSED" after three approvals.
-const t1 = Date.now();
-while (!decisions.some(d => String(d.url ?? '').includes('/pay')) && Date.now() - t1 < 260000) {
-  await pause(500);
-}
-if (!decisions.some(d => String(d.url ?? '').includes('/pay'))) {
-  console.log('  !! the payment dialog was never answered -- this run proves nothing');
+// Mirror a terminal line into the page transcript, so the human sees the gate's
+// own account of what it did without switching windows.
+function mirror(who, text) {
+  page.locator('#t').evaluate(
+    (el, [w, t]) => window.__say(w, t), [who, text]).catch(() => {});
 }
 
-console.log('\n===== RESULT ' + '='.repeat(42));
-console.log('server received :', JSON.stringify(seen));
-console.log('');
+// Read the current step across the isolated-world boundary.
+//
+// page.evaluate() cannot see page globals on this engine, so this reads a data
+// attribute the page's own script writes. Verified against the engine: the page
+// sets window.__lodestar.step correctly and the DOM carries the same value,
+// while reading window.__lodestar from the driver returns undefined.
+async function readStepFromPage() {
+  const attr = await page.locator('body').getAttribute('data-step').catch(() => null);
+  return attr === null ? 0 : Number(attr);
+}
+
+// The approval dialog, labelled with the step it belongs to. The step number is
+// READ FROM THE PAGE rather than guessed, because the page is what knows which
+// button was pressed. Guessing here is how the last run became unreadable.
+//
+// It is read from a DOM attribute, NOT from window.__lodestar. This engine is
+// anti-detection, so page.evaluate() runs in an ISOLATED WORLD and cannot see
+// page globals: the page's own scripts do set window.__lodestar.step (verified
+// -- the DOM shows the values), but reading it from the driver returns
+// undefined forever. The DOM is shared between the two worlds, so a data
+// attribute is the only channel that actually carries a value across.
+let dialogSeq = 0;
+const decisions = [];
+const stopPrompt = setInterval(async () => {
+  const pending = approval.listPending();
+  if (!pending.length) return;
+
+  for (const entry of pending) {
+    if (entry.__shown) continue;
+    entry.__shown = true;
+    dialogSeq += 1;
+
+    // listPending() maps to entry.record, so the fields are on `entry` itself.
+    // Reading entry.record.method gave undefined and printed '?'.
+    const rec = entry.record ? entry.record : entry;
+    const stepNo = Number(await readStepFromPage()) || 0;
+    const digest = rec.fingerprint?.digest ?? null;
+
+    const ask = `STEP ${stepNo} of 3 -- the gate is asking about ${rec.method} ${rec.url}`
+              + (digest
+                  ? `\nbody digest ${digest.slice(0, 8)} (the body is never shown or stored)`
+                  : '\nno body digest -- treated as unknown, not as safe');
+
+    let choice;
+    try {
+      choice = await page.evaluate((d) => new Promise((res) => {
+        const box = document.createElement('div');
+        box.id = 'lodestar-dialog';
+        box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;'
+          + 'align-items:center;justify-content:center;z-index:2147483647;font:15px -apple-system,sans-serif';
+        box.innerHTML = '<div style="background:#fff;padding:26px 28px;border-radius:12px;'
+          + 'max-width:580px;box-shadow:0 20px 60px rgba(0,0,0,.45)">'
+          + '<div style="font-size:12px;letter-spacing:.09em;color:#b45309;font-weight:700">LODESTAR</div>'
+          + '<h2 style="margin:8px 0 4px;font-size:20px">Irreversible action requested</h2>'
+          + '<pre style="background:#f5f5f5;padding:12px;border-radius:8px;font-size:13px;'
+          + 'white-space:pre-wrap;overflow:auto;max-height:190px">'
+          + d.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</pre>'
+          + '<div style="margin-top:18px;display:flex;gap:10px">'
+          + '<button id="no"  style="flex:1;padding:12px;border-radius:8px;border:1px solid #ccc;'
+          + 'background:#fff;font:inherit;cursor:pointer">Refuse</button>'
+          + '<button id="yes" style="flex:1;padding:12px;border-radius:8px;border:0;'
+          + 'background:#111;color:#fff;font:inherit;cursor:pointer;font-weight:600">Approve once</button>'
+          + '</div></div>';
+        document.body.appendChild(box);
+        box.querySelector('#yes').onclick = () => { box.remove(); res(true); };
+        box.querySelector('#no').onclick  = () => { box.remove(); res(false); };
+      }), ask);
+    } catch {
+      return; // browser closed underneath us; nothing left to approve
+    }
+
+    const verb = choice ? 'APPROVED' : 'REFUSED';
+    const what = `${rec.method ?? '?'} ${rec.url ?? '?'}`;
+    console.log(`  dialog ${dialogSeq}: you ${verb} ${what}`
+      + ` for STEP ${stepNo}${digest ? `  (digest ${digest.slice(0, 8)})` : ''}`);
+    decisions.push({ verb, method: rec.method ?? null, url: rec.url ?? null,
+                     digest, step: stepNo, id: entry.id, seq: dialogSeq });
+    mirror(page, 'you', `${verb === 'APPROVED' ? 'Approve once' : 'Refuse'} on the STEP ${stepNo} dialog.`);
+    approval.settle(entry.id, { approved: choice, scope: 'once' });
+  }
+}, 200);
+
+// Wait for the HUMAN to press a given step's button. This script never clicks.
+async function waitForStep(n, label) {
+  const secs = Math.round(STEP_TIMEOUT_MS / 1000);
+  console.log(`\n>>> On the page: press "${label}"  (waiting up to ${secs}s)`);
+  const t0 = Date.now();
+  while (Date.now() - t0 < STEP_TIMEOUT_MS) {
+    const s = await readStepFromPage();
+    if (s >= n) { await pause(1500); return true; }
+    await pause(250);
+  }
+  console.log(`  !! you never pressed step ${n}`);
+  mirror('bad', `step ${n} was never pressed -- the run cannot continue.`);
+  return false;
+}
+
+console.log('\npage loaded. window should be open.');
+console.log('Read the page: it lists every step, every dialog, and what the server received.');
+
+let ranOut = false;
+
+// --- STEP 1
+if (!await waitForStep(1, 'STEP 1 -- Add to bag')) ranOut = true;
+
+// --- STEP 2: identical body. A dialog MUST appear again.
+if (!ranOut) {
+  console.log('\n>>> Answer the STEP 1 dialog first, then press STEP 2 on the page.');
+  console.log('>>> A SECOND dialog MUST appear. Before the fix it did not.');
+  if (!await waitForStep(2, 'STEP 2 -- Add to bag again (identical body)')) ranOut = true;
+}
+
+// --- STEP 3: the one that matters
+if (!ranOut) {
+  console.log('\n>>> Answer the STEP 2 dialog, then press STEP 3 -- Pay.');
+  console.log('>>> Approving it proves the decision carries through. Refusing proves fail-closed.');
+  if (!await waitForStep(3, 'STEP 3 -- Pay (card number)')) ranOut = true;
+}
+
+// Let the last request settle, then let the human read before anything closes.
+console.log('\n>>> All steps pressed. Letting the last request settle...');
+await pause(3000);
 
 // Distinguish "the gate held it" from "the run ended before anyone decided".
 // Only the first is a result. Conflating them is how you get a green that means
@@ -316,13 +380,16 @@ const cartDecisions = askedAbout('/cart');
 const payLanded = seen.includes('POST /pay');
 const payApproved = payDecisions.some(d => d.verb === 'APPROVED');
 const payRefused  = payDecisions.some(d => d.verb === 'REFUSED');
+const cartPosts = seen.filter(x => x === 'POST /cart').length;
 
-console.log('\n  --- what was asked, and what you said ---');
-if (!decisions.length) console.log('  (no dialogs were answered)');
-for (const d of decisions) console.log(`  ${d.verb.padEnd(9)} ${d.method ?? '?'} ${d.url ?? '?'}`);
+console.log('\n===== RESULT ' + '='.repeat(42));
+console.log('server received :', JSON.stringify(seen));
 
-console.log('\n  --- what the server received ---');
-console.log(`  ${JSON.stringify(seen)}`);
+console.log('\n  --- dialogs you answered, in order ---');
+if (!decisions.length) console.log('  (none)');
+for (const d of decisions) {
+  console.log(`  ${d.seq}. STEP ${d.step}: ${d.verb.padEnd(9)} ${d.method ?? '?'} ${d.url ?? '?'}`);
+}
 
 // The gate's own account of what it decided, so the verdict is not based only
 // on what the human thinks they clicked.
@@ -336,20 +403,21 @@ for (const r of rows) {
 console.log(`\n  counts: ${JSON.stringify(audit.counts())}`);
 
 console.log('\n===== VERDICT ' + '='.repeat(40));
-if (payLanded && payApproved) {
+if (ranOut) {
+  console.log('INCONCLUSIVE. You did not press every step, so there is nothing to judge.');
+} else if (payLanded && payApproved) {
   console.log('CORRECT AND DEMONSTRATED. You approved POST /pay and it landed.');
   console.log('  The gate asked, a human decided, and the decision was carried out.');
   console.log('  That is the product: not a refusal, a decision.');
-} else if (payLanded && !payApproved) {
-  console.log('*** DEFECT: the payment landed WITHOUT an approval for it ***');
+} else if (payLanded && !payApproved && !payRefused) {
+  console.log('*** DEFECT: the payment landed with NO approval dialog for it ***');
   console.log('  Decide the rest of this yourself; do not ship this build.');
-} else if (payRefused) {
+} else if (payRefused && !payLanded) {
   console.log('CORRECT AND DEMONSTRATED. You REFUSED POST /pay and it was held.');
   console.log('  The card number never left the machine. That is the product.');
 } else if (payDecisions.length === 0) {
   console.log('INCONCLUSIVE. POST /pay was never put to you.');
-  console.log('  A refusal cannot be inferred from the absence of a dialog. Re-run');
-  console.log('  and answer the payment prompt.');
+  console.log('  The page transcript says whether the request left the browser at all.');
 } else {
   console.log('INCONCLUSIVE. The payment did not land and you did not refuse it.');
   console.log(`  payment decisions: ${JSON.stringify(payDecisions)}`);
@@ -357,7 +425,6 @@ if (payLanded && payApproved) {
 }
 
 // The grant fix, judged on what actually reached the server.
-const cartPosts = seen.filter(x => x === 'POST /cart').length;
 console.log('\n===== ONE-TIME GRANT CHECK ' + '='.repeat(28));
 console.log(`  cart dialogs answered : ${cartDecisions.length}`);
 console.log(`  POST /cart on server  : ${cartPosts}`);
@@ -370,7 +437,19 @@ if (cartDecisions.length === 0) {
   console.log('  A repeat asked again instead of matching a spent grant.');
 }
 
-await pause(2000);
+const passed = (payLanded && payApproved) || (payRefused && !payLanded);
+mirror(passed ? 'srv' : 'bad',
+  passed ? 'VERDICT: CORRECT AND DEMONSTRATED -- full breakdown is in the terminal.'
+        : 'VERDICT: INCONCLUSIVE -- the terminal says why.');
+
+const holdMs = Number(process.env.HOLD_MS || 900000);
+console.log('\n>>> The window stays open so you can read the transcript. Close it yourself.');
+console.log(`>>> Holding for ${Math.round(holdMs / 60000)} minutes, then closing.`);
+
+// Hold the window open for the human. Bounded so a forgotten run cannot outlive
+// the session, but long enough to actually read the transcript.
+await pause(holdMs);
+
 stopPrompt();
 await browser.close();
 srv.close();
