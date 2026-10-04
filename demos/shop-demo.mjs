@@ -268,6 +268,11 @@ async function readStepFromPage() {
 // attribute is the only channel that actually carries a value across.
 let dialogSeq = 0;
 const decisions = [];
+// NOTE: setInterval returns a Timer OBJECT, not a cleanup function. Calling
+// stopPrompt() at teardown threw "stopPrompt is not a function" and left this
+// poller -- and the browser it holds -- running after the run reported a
+// verdict. clearInterval wants the handle, so keep the handle and clear it
+// through the global.
 const stopPrompt = setInterval(async () => {
   const pending = approval.listPending();
   if (!pending.length) return;
@@ -450,6 +455,6 @@ console.log(`>>> Holding for ${Math.round(holdMs / 60000)} minutes, then closing
 // the session, but long enough to actually read the transcript.
 await pause(holdMs);
 
-stopPrompt();
+clearInterval(stopPrompt);
 await browser.close();
 srv.close();
