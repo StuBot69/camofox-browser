@@ -375,6 +375,17 @@ export function resolveCamoufox({ verify = true } = {}) {
  * Depth and breadth are bounded: this runs during test collection on every
  * `npm test`, so a naive recursive walk of $HOME would be unacceptable.
  */
+function isExecutable(p) {
+  // accessSync THROWS on failure and returns undefined on success. Testing the
+  // return value (`!fs.accessSync(...)`) is therefore true on SUCCESS — an
+  // inversion that silently inverts any gate built on it. Check both.
+  try {
+    return fs.accessSync(p, fs.constants.X_OK) === undefined;
+  } catch {
+    return false;
+  }
+}
+
 function sweepForUnknownCamoufox() {
   const hits = [];
   const seenDirs = new Set();
@@ -411,7 +422,12 @@ function sweepForUnknownCamoufox() {
         // Skip trees that cannot contain a browser and are enormous.
         if (['node_modules', '.git', 'Library', 'Trash', '.Trash'].includes(e.name)) continue;
         walk(full, depth + 1);
-      } else if (NAMES.has(e.name.toLowerCase())) {
+      } else if (NAMES.has(e.name.toLowerCase()) && isExecutable(full)) {
+        // Executability, not name alone. A browser that is installed but cannot be
+        // executed is already caught by the KNOWN-layout path (mode 'unusable');
+        // claiming 'unknown-layout' for a non-executable file turns a developer's
+        // stray download into a hard failure. Verified: an inert text file named
+        // `camoufox` under ~/Downloads previously hard-failed the suite.
         hits.push(full);
       }
     }
