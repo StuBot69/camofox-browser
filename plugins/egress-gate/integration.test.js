@@ -17,6 +17,7 @@
 import { describe, expect, test, jest } from '@jest/globals';
 import { firefox } from 'playwright-core';
 import {
+  describeCamoufoxEngine,
   findCamoufoxBinary,
   startRecordingServer,
   MUTATING,
@@ -27,12 +28,20 @@ import { createAuditLog } from './lib/audit.js';
 import { createEgressGate } from './lib/gate.js';
 import { REASONS } from './lib/policy.js';
 
-const CAMOUFOX_BIN = findCamoufoxBinary();
+// 5 Oct 2026: was
+//   const CAMOUFOX_BIN = findCamoufoxBinary();
+//   const describeIfRealEngine = CAMOUFOX_BIN ? describe : describe.skip;
+//   const skipReason = CAMOUFOX_BIN ? '' : 'Camoufox binary not found (...)';
+// Three problems. (1) On Linux CI the browser IS installed but at a layout this
+// resolver did not know, so all 12 tests here skipped SILENTLY and CI reported
+// green. (2) `skipReason` was interpolated only into the suite TITLE — a string
+// nobody reads — so it was not a warning in any meaningful sense. (3) A missing
+// binary was reported identically whether it was never downloaded or merely
+// unresolvable. describeCamoufoxEngine distinguishes those, always prints, and
+// fails in CI. The title hack is deleted: the explanation is now real output.
+const describeIfRealEngine = describeCamoufoxEngine;
 
-const describeIfRealEngine = CAMOUFOX_BIN ? describe : describe.skip;
-const skipReason = CAMOUFOX_BIN ? '' : 'Camoufox binary not found (skip real-engine integration tests)';
-
-describeIfRealEngine('egress gate (real engine)' + (skipReason ? ' — SKIPPED: ' + skipReason : ''), () => {
+describeIfRealEngine('egress gate (real engine)', (CAMOUFOX_BIN) => {
   let srv, url, arrived, closeServer;
   let browser, context, page;
 

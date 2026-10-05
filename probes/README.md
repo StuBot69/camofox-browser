@@ -11,16 +11,54 @@ green told us there was nothing there.
 
 ## Running them
 
-All of them need the browser binary:
+All of them need the browser binary.
 
-    export CAMOUFOX_BIN=~/Library/Caches/camoufox/browsers/official/*/Camoufox.app/Contents/MacOS/camoufox
+**Resolve it with `ls`, not a glob in an assignment.** Bash expands `~` in an
+assignment but does NOT do pathname expansion there, so
+`export CAMOUFOX_BIN=~/.../*/camoufox` silently assigns the literal, unexpanded
+pattern and every run fails with "executable doesn't exist" — which reads like a
+missing browser. Use command substitution:
+
+    CAMOUFOX_BIN="$(ls -d ~/Library/Caches/camofox/browsers/official/*/Camoufox.app/Contents/MacOS/camoufox 2>/dev/null | head -1)"
+    [ -x "$CAMOUFOX_BIN" ] && echo "BIN OK: $CAMOUFOX_BIN" || echo "BIN NOT RESOLVED"
+    export CAMOUFOX_BIN
     node probes/measure_redirect_handler.mjs
 
+If `[ -x ]` fails, the path may still be fine: on this machine the binary's
+visibility through `~/Library` is **intermittently denied by macOS sandboxing,
+surfacing as `No such file or directory` rather than a permissions error**, while
+the file is installed and launches fine minutes later. Retry the whole run
+rather than concluding the browser is gone. See `measure_redirect_gate.mjs`
+for the same hazard handled in code.
+
 Each script states its own invocation in a header comment. They are standalone
-`node` scripts with no test runner, and they exit non-zero if their claim is
-falsified. They are not wired into `jest`, deliberately: they take ~10-30s each
-and they need a live browser, so they are for when a claim is in question, not on
-every commit.
+`node` scripts with no test runner. They are not wired into `jest`, deliberately:
+they take ~10-30s each and they need a live browser, so they are for when a claim
+is in question, not on every commit.
+
+### Which of them can actually fail — read this before trusting a green
+
+**A probe that only prints its verdict cannot fail a build, and its green means
+nothing.** Corrected 5 Oct 2026: this file previously claimed *all* the probes
+"exit non-zero if their claim is falsified". That was false. As of now:
+
+| Probe | Exits non-zero on a falsified claim? |
+|---|---|
+| `check_demo_pay_path.mjs` | **yes** — failures collected via `say()`, gates `process.exit(1)` |
+| `render_check.mjs` | **yes** — same pattern |
+| `measure_redirect_gate.mjs` | **yes** — per-case `expect`, `problems[]`, non-zero exit |
+| `measure_firefox_gate.mjs` | **yes** — `say()` recorder, non-zero exit |
+| `measure_redirect_handler.mjs` | no — prints `VERDICT: BYPASS xN`, always exits 0 |
+| `measure_websocket_gate.mjs` | no — prints, always exits 0 |
+| `measure_context_gate.mjs` | no — prints, always exits 0 |
+
+For the three that only print, **read the output; do not rely on the exit code.**
+Treat that as outstanding work, not as a settled property of those files.
+
+Every probe must also be able to distinguish "the gate did the right thing" from
+"the scenario never ran". A control case that registers a grant for one URL while
+the page requests another scores identically to a perfect gate — see
+`measure_redirect_gate.mjs` cases C and D, which were vacuous until 5 Oct 2026.
 
 ## What each one measures
 

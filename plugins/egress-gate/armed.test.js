@@ -29,10 +29,15 @@ import {
 import { createEgressGate } from './lib/gate.js';
 import { createApprovalSurface } from './lib/approval.js';
 import { createAuditLog } from './lib/audit.js';
-import { findCamoufoxBinary, startRecordingServer, waitFor } from './test-helpers.js';
+import { findCamoufoxBinary, describeCamoufoxEngine, startRecordingServer, waitFor } from './test-helpers.js';
 
-const BIN = findCamoufoxBinary();
-const realEngine = BIN ? describe : describe.skip;
+// 5 Oct 2026: was `const BIN = findCamoufoxBinary(); const realEngine = BIN ? describe : describe.skip;`
+// That form reported "no binary" for three unrelated situations and skipped on all
+// three, so on Linux CI — where the browser IS downloaded and installed but at a
+// path this repo's resolver did not know — the entire real-engine 307/308 suite
+// vanished SILENTLY and the run reported green. describeCamoufoxEngine skips only
+// when the browser genuinely was never fetched, and fails loudly otherwise.
+const realEngine = describeCamoufoxEngine;
 
 /** Silent by default: a passing test that logs is fine, a failing one must shout. */
 function makeLog() {
@@ -463,6 +468,53 @@ describe('the scope line is honest', () => {
     expect(SCOPE.enforcedAt).toEqual(['context.route', 'context.routeWebSocket']);
   });
 
+  // Added 5 Oct 2026. The test above asserts `toMatch(/redirect/i)`, which is a
+  // substring check: it passes on ANY wording containing the word "redirect",
+  // including the pre-2026-10-05 string that named ONLY 307/308 and so told an
+  // operator that 301/302 were covered when a PUT/PATCH/DELETE on those codes
+  // carries its body past the gate. Mutation-tested: reverting the string to
+  // its old wording left this suite fully green.
+  //
+  // So this pins the specific claim that was wrong. It is still a string
+  // assertion and cannot prove the ENGINE's behaviour -- that is what
+  // armed.test.js's real-engine cross-product tests and probes/ are for. What
+  // it does guarantee is that the published sentence cannot silently shrink
+  // back to naming only the two status codes.
+  test('SCOPE does not understate the redirect hole: it names 301/302 for non-POST methods', () => {
+    const excludes = SCOPE.excludes.join(' ');
+
+    // Must not be the old status-only claim.
+    expect(excludes).not.toMatch(/follow-up hop of a 307\/308 redirect chain/);
+
+    // Must name the codes that DO carry a body past the gate.
+    expect(excludes).toMatch(/301/);
+    expect(excludes).toMatch(/302/);
+    expect(excludes).toMatch(/307\/308/);
+
+    // Must say the set is method-qualified, not status-only.
+    expect(excludes).toMatch(/other than POST/i);
+
+    // 5 Oct 2026 — two further pins, each for a falsehood an auditor MEASURED in
+    // the previous wording. Both are the same class of defect as the original:
+    // a sentence in the published string that is confidently untrue.
+    //
+    // (a) "303 downgrades every method to GET" was false — HEAD is exempt
+    //     (`status === 303 && !["GET","HEAD"].includes(method)`, fetch.js:292).
+    //     Pin it so the exception cannot be quietly dropped back into a universal.
+    expect(excludes).toMatch(/except HEAD/i);
+
+    // (b) The string carried no engine qualifier, so it read as a claim about
+    //     Playwright in general. The project's own rule refuses "always" because
+    //     Playwright does not promise redirect coverage, so the version belongs in
+    //     the PUBLISHED sentence, not only in a code comment nobody outside the
+    //     repo reads. Pin the qualifier and the explicit unmeasured caveat.
+    expect(excludes).toMatch(/Camoufox 152\.0\.4-beta\.31/);
+    expect(excludes).toMatch(/Other engines are unmeasured/i);
+
+    // Must stay honest about not preventing.
+    expect(excludes).toMatch(/NOT prevented/);
+  });
+
   test('the snapshot publishes scope, and never claims redirect prevention', () => {
     const { armed } = rig({ context: fakeContext() });
     const snap = armed.snapshot();
@@ -560,7 +612,7 @@ describe('redirect-chain DETECTION (not prevention)', () => {
 // The tests below use the real engine. They exist because the redirect finding
 // came from a probe, and the lesson of the MV3 badge is that probes lie. These
 // assert against the actual server's received bytes.
-realEngine('real engine: the bypass is real, and the gate says so', () => {
+realEngine('real engine: the bypass is real, and the gate says so', (BIN) => {
   let browser;
   let context;
   let server;
@@ -842,7 +894,7 @@ realEngine('real engine: the bypass is real, and the gate says so', () => {
   });
 });
 
-realEngine('real engine: 307/308 redirect chain, detected not prevented', () => {
+realEngine('real engine: 307/308 redirect chain, detected not prevented', (BIN) => {
   let browser;
   let context;
 

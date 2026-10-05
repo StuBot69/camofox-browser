@@ -74,7 +74,18 @@
  *   >> BODY LANDED WITHOUT A HANDLER INVOCATION: POST /hop2 body="card=4111..."
  *
  * Reproduced for fetch and for a navigating <form method=post>. 301/302 are not
- * affected: they downgrade POST to GET and the body does not follow.
+ * affected FOR POST: the engine downgrades a POST to GET and drops the body.
+ *
+ * THAT LAST SENTENCE WAS ONCE READ AS "301/302 ARE SAFE" AND THAT IS WRONG.
+ * The downgrade is conditioned on the method being POST (playwright-core
+ * fetch.js:292 -- `(status === 301 || status === 302) && method === "POST"`).
+ * A PUT, PATCH or DELETE on a 301 or 302 keeps its method AND its body, and the
+ * follow-up hop still skips context.route() exactly as 307/308 does. Measured
+ * 5 Oct 2026 on beta.31 across the full method x status cross product; see
+ * SCOPE.excludes below, which now states the set by METHOD rather than by
+ * status code. The bug was never in the gate's behaviour -- it detected and
+ * declined to prevent all of these identically -- it was in an under-scoped
+ * sentence in the string an operator reads.
  *
  * NO IN-PLUGIN FIX EXISTS. Playwright's route API does not promise redirect
  * coverage, and its maintainer calls the current behaviour working as designed.
@@ -109,7 +120,43 @@ export const SCOPE = Object.freeze({
     'WebSocket handshakes via context.routeWebSocket(), decided through the same policy and approval queue',
   ]),
   excludes: Object.freeze([
-    'the follow-up hop of a 307/308 redirect chain: issued below context.route(), never reaches the handler, DETECTED but NOT prevented',
+    // WIDENED 5 Oct 2026. This string used to name ONLY 307/308, and that was
+    // true as far as it went but misleading as a whole -- see the method
+    // qualifier below. The fix is to the WORDING, not the code: the gate
+    // already detects and refuses to prevent every case listed here
+    // identically. What was wrong was that an operator reading this believed
+    // 301/302 were covered.
+    //
+    // Measured on Camoufox 152.0.4-beta.31 + playwright-core 1.59.1: the
+    // engine rewrites the follow-up hop to GET and drops the body ONLY for
+    // POST (and for any method on 303). A non-POST method on 301 or 302 keeps
+    // its method AND its body, and the hop still skips context.route().
+    // So the set that carries a body past the gate is:
+    //   POST x {307,308}   +   {PUT,PATCH,DELETE} x {301,302,307,308}
+    // and 303 is safe for every method. Stated explicitly rather than as a
+    // status list, because the status list was exactly what made it wrong.
+    // 5 Oct 2026 — TWO corrections an auditor forced by measurement, both of which
+    // make this string MORE precise rather than more alarming:
+    //
+    // (a) "303 downgrades every method to GET" was FALSE. Measured: HEAD is
+    //     exempt, matching Playwright's own condition at fetch.js:292,
+    //     `status === 303 && !["GET","HEAD"].includes(method)`. So
+    //     `HEAD x 303 -> hop2=HEAD`. Practically harmless — HEAD carries no body
+    //     and is in SAFE_METHODS — but it is a false universal inside a string
+    //     whose entire purpose is precision, which is the one thing this product
+    //     cannot afford.
+    // (b) The string carried NO ENGINE QUALIFIER, so it reads as a universal claim
+    //     about Playwright. The project's own rule (armed.js:79-82) refuses the
+    //     word "always" precisely because Playwright does not promise redirect
+    //     coverage, and the version pinning lived only in a code comment an
+    //     operator reading the PUBLISHED string never sees. The old string had the
+    //     same defect, so this is not a regression — but widening the claim is the
+    //     moment to stop making it.
+    //
+    // Measured on Camoufox 152.0.4-beta.31 / playwright-core 1.59.1: 14 of 20
+    // method x status cells carry method + body past context.route() with no audit
+    // row. `routeSawHop2=false`, `eventSawHop2=true` across all 20.
+    'on Camoufox 152.0.4-beta.31 / playwright-core 1.59.1, measured: the follow-up hop of a redirect chain that preserves the method -- POST on 307/308, and any method other than POST on 301/302/307/308 -- is issued below context.route(), never reaches the handler, DETECTED but NOT prevented. 303 downgrades every method except HEAD to GET and carries no body. Other engines are unmeasured.',
     'requests issued by browser-internal processes outside the context, e.g. some prefetch and service-worker-originated fetches not attributed to a page',
   ]),
   /**
