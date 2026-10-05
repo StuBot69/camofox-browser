@@ -133,7 +133,8 @@ export const SCOPE = Object.freeze({
     // its method AND its body, and the hop still skips context.route().
     // So the set that carries a body past the gate is:
     //   POST x {307,308}   +   {PUT,PATCH,DELETE} x {301,302,307,308}
-    // and 303 is safe for every method. Stated explicitly rather than as a
+    // and 303 downgrades every method EXCEPT HEAD to GET, carrying no body.
+    // Stated explicitly rather than as a
     // status list, because the status list was exactly what made it wrong.
     // 5 Oct 2026 — TWO corrections an auditor forced by measurement, both of which
     // make this string MORE precise rather than more alarming:
@@ -156,7 +157,14 @@ export const SCOPE = Object.freeze({
     // Measured on Camoufox 152.0.4-beta.31 / playwright-core 1.59.1: 14 of 20
     // method x status cells carry method + body past context.route() with no audit
     // row. `routeSawHop2=false`, `eventSawHop2=true` across all 20.
-    'on Camoufox 152.0.4-beta.31 / playwright-core 1.59.1, measured: the follow-up hop of a redirect chain that preserves the method -- POST on 307/308, and any method other than POST on 301/302/307/308 -- is issued below context.route(), never reaches the handler, DETECTED but NOT prevented. 303 downgrades every method except HEAD to GET and carries no body. Other engines are unmeasured.',
+    'on Camoufox 152.0.4-beta.31 / playwright-core 1.59.1, measured same-origin and '
+    + 'cross-origin with no difference: the follow-up hop of a redirect chain that carries a '
+    + 'request body past the gate is POST on 307/308, and PUT, PATCH or DELETE on 301/302/'
+    + '307/308. Those hops are issued below context.route(), never reach the handler, get no '
+    + 'audit row, and are DETECTED but NOT prevented. GET, HEAD and OPTIONS also skip '
+    + 'context.route() on those statuses but carry no body and are NOT reported. 301/302 '
+    + 'downgrade POST to GET with no body; 303 downgrades every method except HEAD, which '
+    + 'stays HEAD; 300/304/305 were not followed at all. Other engines are unmeasured.',
     'requests issued by browser-internal processes outside the context, e.g. some prefetch and service-worker-originated fetches not attributed to a page',
   ]),
   /**

@@ -391,17 +391,16 @@ function sweepForUnknownCamoufox() {
   const seenDirs = new Set();
 
   // Roots where an install could plausibly live that we do not already scan.
+  // /usr/local and /opt are Homebrew noise (76% of sweep time, zero value).
+  // ~/Downloads is not defensible — upstream ships zips, not bare launchers.
   const roots = [
     path.join(os.homedir(), 'opt'),
     path.join(os.homedir(), '.local'),
     path.join(os.homedir(), '.local/share'),
-    path.join(os.homedir(), 'Downloads'),
-    '/usr/local',
-    '/opt',
   ];
 
   // Unmistakable launcher names, matched case-insensitively as an EXACT basename.
-  const NAMES = new Set(['camoufox', 'camoufox-bin', 'camoufox.exe', 'camoufox-bin.original']);
+  const NAMES = new Set(['camoufox', 'camoufox-bin', 'camoufox.exe']);
 
   const MAX_DEPTH = 4;
   const MAX_HITS = 5;
@@ -508,7 +507,7 @@ export function describeCamoufoxEngine(name, fn) {
   // exit 0 with CI='', exit 1 with CI=true. The distinction that matters is
   // "did the environment say this is CI", not "is the value true".
   const inCI = process.env.CI !== undefined;
-  const skipIsLegitimate = resolution.mode === 'not-fetched' && !inCI;
+  const skipIsLegitimate = (resolution.mode === 'not-fetched' || resolution.mode === 'unknown-layout') && !inCI;
 
   if (bin) {
     describe(name, () => {

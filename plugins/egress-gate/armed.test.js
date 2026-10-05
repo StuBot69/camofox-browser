@@ -492,7 +492,7 @@ describe('the scope line is honest', () => {
     expect(excludes).toMatch(/307\/308/);
 
     // Must say the set is method-qualified, not status-only.
-    expect(excludes).toMatch(/other than POST/i);
+    expect(excludes).toMatch(/PUT, PATCH or DELETE/);
 
     // 5 Oct 2026 — two further pins, each for a falsehood an auditor MEASURED in
     // the previous wording. Both are the same class of defect as the original:
