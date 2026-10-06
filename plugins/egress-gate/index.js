@@ -29,6 +29,7 @@
 import { createEgressGate } from './lib/gate.js';
 import { createApprovalSurface } from './lib/approval.js';
 import { createAuditLog } from './lib/audit.js';
+import { createArmedState, SCOPE } from './lib/armed.js';
 import { REASONS } from './lib/policy.js';
 import { SCOPES } from './lib/approval.js';
 
@@ -93,21 +94,96 @@ export async function register(app, ctx, pluginConfig = {}) {
 
   const gate = createEgressGate({ approval, audit, resolveTabId, log });
 
+  /**
+   * The armed assertion. It answers one question an operator can act on: is the
+   * gate provably in front of this session's egress right now? It is not a
+   * second layer -- it is the thing that refuses to let "the gate is installed"
+   * pass for "the gate works".
+   */
+  const armed = createArmedState({
+    gate,
+    log,
+    enabled,
+    lookupSession: (userId) => sessions.get(ctx.normalizeUserId ? ctx.normalizeUserId(userId) : String(userId)),
+    destroySession: async (userId, opts) => {
+      try {
+        return await ctx.destroySession(userId, opts);
+      } catch {
+        // A session already gone is the state we wanted. Saying "failed" here
+        // would train the reader to ignore the field.
+        return true;
+      }
+    },
+    canaryTimeoutMs: Number(pluginConfig.canaryTimeoutMs) || 5000,
+  });
+
+  /**
+   * A gate that proves itself for one session and not the next is worse than no
+   * assertion, so a disarm anywhere turns the gauge red and takes the affected
+   * session down. enforce() is idempotent per user.
+   */
+  let armedGauge = null;
+  try {
+    armedGauge = await ctx.createMetric('gauge', {
+      name: 'camofox_egress_gate_armed',
+      help: '1 when the egress gate is proven armed on every live session, 0 otherwise',
+    });
+  } catch {
+    armedGauge = null;
+  }
+
+  function publishArmedMetric() {
+    try {
+      armedGauge?.set(armed.snapshot().armed ? 1 : 0);
+    } catch {
+      /* metrics are observability, never a control path */
+    }
+  }
+
   // --- lifecycle ---------------------------------------------------------------
   // emitAsync: the server awaits this before the context can create a page, so
   // there is no window in which an ungated request can be issued.
   events.on('session:created', async ({ userId, context }) => {
     try {
-      await gate.installOnContext(context, { userId, sessionKey: userId });
+      const result = await armed.arm(context, { userId });
+      publishArmedMetric();
+      if (result.armed) return;
+
+      /**
+       * THIS is the fail-closed path, and the ordering matters. server.js
+       * already did sessions.set(key, created) before emitting this event, so
+       * a session that stays registered is a session that will serve pages
+       * from an ungated context. Tear it down before it can.
+       */
+      log('error', 'egress gate is NOT armed; destroying the session', {
+        userId,
+        reason: result.reason ?? 'gate-disabled',
+      });
+      await destroyUnarmedSession(userId);
     } catch (err) {
-      // A gate that failed to install is a gate that is not there. Say so loudly
-      // rather than letting the session run ungated and quiet.
-      log('error', 'egress gate FAILED to install on session context', {
+      // arm() THROWS rather than returning armed:false for every way it can
+      // fail to prove itself, so this catch is the normal failure path, not an
+      // edge case. A gate that failed to prove itself is a gate that is not
+      // there: say so loudly, and do not let the session run ungated at all.
+      log('error', 'egress gate FAILED to arm on session context; destroying the session', {
+        userId,
+        reason: err?.reason ?? 'arm-failed',
+        error: err?.message,
+      });
+      await destroyUnarmedSession(userId);
+    }
+  });
+
+  async function destroyUnarmedSession(userId) {
+    try {
+      await ctx.destroySession(userId, { reason: 'egress_gate_not_armed' });
+    } catch (err) {
+      log('error', 'egress gate could not destroy an unarmed session', {
         userId,
         error: err?.message,
       });
     }
-  });
+  }
 
   // A tab that dies takes its pending approvals with it: nobody is going to
   // answer a question about a page that no longer exists, and a waiter left
@@ -125,14 +201,51 @@ export async function register(app, ctx, pluginConfig = {}) {
 
   events.on('session:destroyed', ({ userId }) => {
     approval.forgetSession(userId);
+    // Drop the watcher and its timers. A late timer firing for a session we
+    // closed on purpose would raise an alarm about our own cleanup.
+    armed.forget(userId);
     approval.refuseWhere(
       (r) => userId != null && String(r.userId) === String(userId),
       REASONS.APPROVAL_DENIED,
     );
+    publishArmedMetric();
+  });
+
+  // The watchdog is the only thing that notices a route being removed while the
+  // process keeps running. Started here rather than on browser:launched so the
+  // assertion exists even if the browser is launched before this plugin
+  // registers, and stopped on browser:closed so a stale interval cannot report
+  // a disarm for a browser that is gone on purpose.
+  armed.startWatchdog();
+
+  // browser:closed is the one event that can invalidate every session at once.
+  // Nothing is disarmed here -- the gates were fine -- but nothing is armed
+  // either, and the gauge must say so rather than reading stale true.
+  events.on('browser:closed', () => {
+    armed.stopWatchdog();
+    publishArmedMetric();
   });
 
   // --- the human's side --------------------------------------------------------
   const middleware = auth();
+
+  /**
+   * The assertion endpoint. /health-style: 200 when the gate is proven armed,
+   * 503 when it is not, body always present so the reason survives a scrape.
+   * Deliberately NOT folded into the global /health: that endpoint's contract
+   * belongs to the whole server, and a policy decision changing a page's status
+   * code is not something to do silently.
+   *
+   * NOTE: plugin routes are not part of openapi.json. The generator only reads
+   * server.js, and every route it knows about is a server.js route -- so there
+   * is deliberately no @openapi block here. Documenting this endpoint in README
+   * instead of pretending the spec covers it.
+   */
+  app.get('/egress-gate/armed', middleware, (_req, res) => {
+    const snap = armed.snapshot();
+    publishArmedMetric();
+    res.status(snap.armed ? 200 : 503).json(snap);
+  });
 
   app.get('/egress-gate/audit', middleware, (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
@@ -189,5 +302,6 @@ export async function register(app, ctx, pluginConfig = {}) {
     timeoutMs,
     headroomMs: APPROVAL_HEADROOM_MS,
     handlerTimeoutMs,
+    scope: SCOPE.detectionOfRedirectChains,
   });
 }

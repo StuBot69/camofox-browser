@@ -38,6 +38,12 @@ jobs:
           npm ci --prefix mcp --ignore-scripts
           npm audit --prefix mcp --omit=dev
 
+      - name: Install Camoufox
+        run: npm run fetch-bin
+        env:
+          # camoufox-js uses this for authenticated GitHub release lookups.
+          GITHUB_TOKEN: ${{ github.token }}
+
       - name: Run unit + plugin tests (Jest)
         run: |
           npm install --no-save jest-junit

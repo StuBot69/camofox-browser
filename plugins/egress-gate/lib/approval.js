@@ -179,7 +179,18 @@ export function createApprovalSurface({
       grantedAt: now(),
       approvalId: id,
     };
-    grantsFor(record.sessionKey).set(grantKey(grant), grant);
+    // ONLY a session grant is stored for later requests.
+    //
+    // A 'once' grant must not be kept. It is keyed on method+url+body-digest, so
+    // an identical repeat -- exactly what a retrying agent emits -- matches it
+    // and is allowed with no second prompt. Consuming it after the fact was not
+    // enough: decide() had already returned 'allow' before the grant was spent,
+    // so the repeat went through anyway. The honest fix is that a one-time
+    // approval is never a standing grant at all -- it allows the request it was
+    // given for, and nothing else.
+    if (scope === 'session') {
+      grantsFor(record.sessionKey).set(grantKey(grant), grant);
+    }
 
     return { allowed: true, reason: REASONS.APPROVED, grant, approvalId: id };
   }

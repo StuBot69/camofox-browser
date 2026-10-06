@@ -611,6 +611,7 @@ Uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) when available (fast, no browser
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `GET` | `/egress-gate/armed` | 200 only when the gate is proven armed on every live session, 503 otherwise; the body always carries `scope` and the redirect-chain egress counts |
 | `GET` | `/egress-gate/audit` | Irreversible decisions (method, URL, allow/refuse, reason). Newest first |
 | `GET` | `/egress-gate/stats` | Counters: silent allows, asks, refusals, pending approvals |
 | `GET` | `/egress-gate/approvals/pending` | Requests waiting on a human |
@@ -656,9 +657,23 @@ reads.
 
 **Coverage limit — this gate protects actions that go through this server.**
 Anything driving Chrome directly (CDP), a real desktop browser, or any process
-that bypasses camofox-browser is not gated by this. WebSocket frames and requests
-made by service workers are outside the routing surface too. This is stated here
-rather than left for someone to assume otherwise.
+that bypasses camofox-browser is not gated by this. WebSocket handshakes *are*
+intercepted — `context.routeWebSocket()` refuses them, including approved ones,
+because pass-through does not complete on this engine and a refused socket is
+diagnosable while a phantom connected one is not. Frames on a socket established
+outside the gated context, and requests made by service workers outside context
+attribution, remain outside the routing surface. This is stated here rather than
+left for someone to assume otherwise.
+
+Most significantly, **the follow-up hop of a 307/308 redirect chain is outside
+the routing surface.** The gate detects it — it is surfaced as an error-level
+`ungated_request` alert with `prevented: false` — but cannot prevent it, because
+the browser issues that hop below `context.route()`. The approval you gave for
+the first request does not carry to the second, and nothing asks. If a claim
+about redirect coverage ever matters to you, read the measurements before
+trusting it: see [`probes/README.md`](probes/README.md) and run
+`probes/measure_redirect_handler.mjs`. Those probes launch a real browser and
+assert against a real server, which is the layer the unit tests cannot reach.
 
 **Cost.** Measured locally on the real engine: the gate adds roughly 11–65ms
 median to a click (it varies by request type and page). When a mutating request
@@ -668,6 +683,10 @@ nobody tolerates is a gate someone turns off — if the wait is intolerable on y
 pages, the fix is a session grant, not disabling the gate.
 
 Disable with `"egress-gate": { "enabled": false }` in `camofox.config.json`.
+
+Prometheus: `camofox_egress_gate_armed` is 1 when the gate is proven armed on
+every live session and 0 otherwise (visible on `/metrics` with
+`PROMETHEUS_ENABLED=1`).
 
 ## Search Macros
 

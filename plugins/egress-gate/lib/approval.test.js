@@ -8,7 +8,7 @@
  */
 import { describe, expect, test, jest } from '@jest/globals';
 import { createApprovalSurface, DEFAULT_APPROVAL_TIMEOUT_MS, SCOPES } from './approval.js';
-import { REASONS, fingerprintBody } from './policy.js';
+import { REASONS, fingerprintBody, decide } from './policy.js';
 
 const REQ = {
   method: 'POST',
@@ -199,5 +199,63 @@ describe('session grants', () => {
     expect(outcome.allowed).toBe(false);
     expect(log).toHaveBeenCalled();
     // The decision is the timeout, not the logger's exception.
+  });
+});
+
+/**
+ * 'Approve once' has to mean once.
+ *
+ * Found by Stu running the end-to-end demo the way a person does: approve the
+ * add-to-bag, press it again. The second POST reached the server with no second
+ * prompt.
+ *
+ * A 'once' grant is keyed on method+url+body-digest. Storing one lets any
+ * identical repeat match it -- and an identical repeat is exactly what a
+ * retrying agent emits, forever. An earlier attempt stored the grant and spent it
+ * AFTER decide() had already returned 'allow'; the repeat still went through,
+ * because by then the decision had been made. A one-time approval is therefore
+ * not stored at all: it allows the request it was given for, and nothing else.
+ */
+describe("'once' is one request, not a standing grant", () => {
+  const askAndApprove = async (scope) => {
+    const surface = createApprovalSurface({ timeoutMs: 5000, randomId: ids() });
+    const pending = surface.ask(REQ);
+    await new Promise((r) => setTimeout(r, 5));
+    surface.settle('approval-1', { approved: true, scope });
+    const outcome = await pending;
+    return { surface, outcome };
+  };
+
+  test("a once-approval allows its own request and is not kept as a grant", async () => {
+    const { surface, outcome } = await askAndApprove('once');
+    expect(outcome.allowed).toBe(true);
+    // The grant is returned so the caller can audit it, but it is NOT stored,
+    // so no later request can match it.
+    expect(outcome.grant).toMatchObject({ scope: 'once' });
+    expect(surface.listGrants(REQ.sessionKey)).toHaveLength(0);
+  });
+
+  test('an identical repeat asks again rather than matching the approval', async () => {
+    const { surface } = await askAndApprove('once');
+    const repeat = { method: REQ.method, url: REQ.url,
+                     fingerprint: fingerprintBody(REQ.postData) };
+    expect(decide(repeat, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('ask');
+  });
+
+  test('a session grant IS stored -- that is the scope a human chose on purpose', async () => {
+    const { surface, outcome } = await askAndApprove('session');
+    expect(outcome.grant).toMatchObject({ scope: 'session' });
+    expect(surface.listGrants(REQ.sessionKey)).toHaveLength(1);
+
+    const repeat = { method: REQ.method, url: REQ.url,
+                     fingerprint: fingerprintBody('a completely different body') };
+    expect(decide(repeat, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('allow');
+  });
+
+  test('a session grant covers a different body; a once-approval would not have', async () => {
+    const { surface } = await askAndApprove('session');
+    const other = { method: REQ.method, url: REQ.url,
+                    fingerprint: fingerprintBody('card=5555555555554444&cvv=999') };
+    expect(decide(other, { grants: surface.listGrants(REQ.sessionKey) }).action).toBe('allow');
   });
 });

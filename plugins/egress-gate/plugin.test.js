@@ -102,31 +102,65 @@ describe('egress-gate plugin', () => {
     await register(app, ctx, {});
 
     const eventNames = [...ctx.events.listeners].map((l) => l.event).sort();
-    expect(eventNames).toEqual(['session:created', 'session:destroyed', 'tab:destroyed']);
+    expect(eventNames).toEqual([
+      'browser:closed',
+      'session:created',
+      'session:destroyed',
+      'tab:destroyed',
+    ]);
   });
 
-  test('installs on context at session:created and logs if it fails', async () => {
+  test('a session the gate cannot arm is DESTROYED, not logged and left running', async () => {
     const app = fakeApp();
-    const ctx = fakeCtx();
+    const destroySession = jest.fn(async () => true);
+    const ctx = fakeCtx({ destroySession });
     await register(app, ctx, {});
 
     const handler = [...ctx.events.listeners].find((l) => l.event === 'session:created').fn;
     const badContext = {}; // missing route
     await handler({ userId: 'u1', context: badContext });
+
+    // The load-bearing assertion. server.js registers the session BEFORE
+    // emitting this event, so logging an error and carrying on leaves a live
+    // session with an ungated context serving pages.
+    expect(destroySession).toHaveBeenCalledWith('u1', { reason: 'egress_gate_not_armed' });
     expect(ctx.log).toHaveBeenCalledWith(
       'error',
-      'egress gate FAILED to install on session context',
+      'egress gate FAILED to arm on session context; destroying the session',
       expect.objectContaining({ userId: 'u1', error: expect.any(String) }),
     );
+    expect(ctx.log).toHaveBeenCalledWith(
+      'error',
+      'egress gate DISARMED',
+      expect.objectContaining({ armed: false, event: 'egress_gate_disarmed' }),
+    );
+  });
 
-    // Successful install
-    const ctx2 = fakeCtx();
-    await register(fakeApp(), ctx2, {});
+    test('installs the route, and a context the gate cannot prove is DESTROYED', async () => {
+    const ctx2 = fakeCtx({ destroySession: jest.fn(async () => true) });
+    // A short canary so the unprovable case resolves in test time rather than
+    // sitting on the production budget.
+    await register(fakeApp(), ctx2, { canaryTimeoutMs: 50 });
     const handler2 = [...ctx2.events.listeners].find((l) => l.event === 'session:created').fn;
+
     let installed = false;
-    const good = { route: jest.fn(async () => (installed = true)) };
+    const good = {
+      route: jest.fn(async () => {
+        installed = true;
+      }),
+      routeWebSocket: jest.fn(async () => true),
+      on: jest.fn(),
+      // A page that never issues the canary request: the route installs fine,
+      // but nothing proves the handler runs.
+      newPage: async () => ({ goto: async () => null, close: async () => {} }),
+      pages: () => [],
+    };
     await handler2({ userId: 'u2', context: good });
+
+    // The route really was installed -- and it still is not enough. install()
+    // returning is not arming.
     expect(installed).toBe(true);
+    expect(ctx2.destroySession).toHaveBeenCalledWith('u2', { reason: 'egress_gate_not_armed' });
   });
 
   test('clamps approval timeout to stay below action budget', async () => {
@@ -194,5 +228,22 @@ describe('egress-gate plugin', () => {
     const res = resStub();
     hDel({ query: { userId: 'u1' } }, res);
     expect(res.body.json).toEqual({ ok: true });
+  });
+
+  test('GET /egress-gate/armed is 503 with the scope attached when nothing is proven', async () => {
+    // With no sessions at all the gate has proven nothing, so the answer is no
+    // -- fail closed -- and the body still says what "no" covers, because a
+    // bare 503 without a reason is how an assertion gets waved through.
+    const app = fakeApp();
+    const ctx = fakeCtx();
+    await register(app, ctx, {});
+
+    const h = findHandler(app, 'GET /egress-gate/armed');
+    const res = resStub();
+    h({}, res);
+    expect(res.body.status).toBe(503);
+    expect(res.body.json.armed).toBe(false);
+    expect(res.body.json.scope.preventionOfRedirectChains).toBe('unavailable-in-plugin');
+    expect(res.body.json.egress.prevented).toBe(0);
   });
 });
